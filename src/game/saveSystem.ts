@@ -115,6 +115,17 @@ export function saveGameProgress(
 
   const updated: SaveSlotData = {
     ...current,
+    hasMagicalBoomerang: player.inventory.hasMagicalBoomerang,
+    hasRedCandle: player.inventory.hasRedCandle,
+    hasRecorder: player.inventory.hasRecorder,
+    hasMagicalRod: player.inventory.hasMagicalRod,
+    hasPowerBracelet: player.inventory.hasPowerBracelet,
+    hasSteppingLadder: player.inventory.hasSteppingLadder,
+    hasFood: player.inventory.hasFood,
+    potionTier: player.inventory.potionTier,
+    ringTier: player.ringTier,
+    hasBlueRing: player.hasBlueRing,
+    hasRedRing: player.hasRedRing,
     hearts: player.hearts,
     maxHearts: player.maxHearts,
     rupees: player.inventory.rupees,

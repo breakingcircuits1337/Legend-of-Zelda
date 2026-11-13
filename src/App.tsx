@@ -701,7 +701,7 @@ export default function App() {
                     TRIFORCE OF WISDOM OBTAINED!
                   </h2>
                   <p className="text-[8px] text-gray-300 leading-relaxed max-w-sm mb-6">
-                    YOU HAVE SAVED HYRULE FROM LEVEL-1: THE EAGLE! THE HERO LINK STANDS VICTORIOUS.
+                    YOU RECOVERED THE TRIFORCE PIECE FROM LEVEL {engineRef.current?.currentScreen.levelNumber}!
                   </p>
                   <button
                     onClick={() => {

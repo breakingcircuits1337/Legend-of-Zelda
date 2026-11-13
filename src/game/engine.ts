@@ -92,7 +92,8 @@ export class GameEngine {
 
   public activeSlot: SaveSlotData | null = null;
   public gameState: GameState = GameState.FILE_SELECT;
-  public currentScreen: ScreenData = ALL_SCREENS.O7_7;
+  private screens = structuredClone(ALL_SCREENS);
+  public currentScreen: ScreenData = this.screens.O7_7;
   public prevScreen: ScreenData | null = null;
 
   // Camera transition state
@@ -290,12 +291,17 @@ export class GameEngine {
   }
 
   public loadSaveSlot(slot: SaveSlotData) {
+    this.screens = structuredClone(ALL_SCREENS);
     this.activeSlot = slot;
     const savedMagicalShield = Boolean(slot.hasMagicalShield);
     const savedShield = slot.hasShield !== false || savedMagicalShield;
     this.player = {
       ...this.createDefaultPlayer(),
-      hearts: slot.hearts,
+      hearts: slot.hearts > 0 ? slot.hearts : Math.min(6, slot.maxHearts),
+      ringTier: slot.ringTier ?? 0,
+      hasBlueRing: Boolean(slot.hasBlueRing),
+      hasRedRing: Boolean(slot.hasRedRing),
+      hasSteppingLadder: Boolean(slot.hasSteppingLadder),
       maxHearts: slot.maxHearts,
       swordTier: slot.swordTier,
       hasShield: savedShield,
@@ -303,6 +309,14 @@ export class GameEngine {
       hasMagicalShield: savedMagicalShield,
       bItem: slot.hasBoomerang ? ItemType.BOOMERANG : slot.bombs > 0 ? ItemType.BOMB : ItemType.NONE,
       inventory: {
+        hasMagicalBoomerang: Boolean(slot.hasMagicalBoomerang),
+        hasRedCandle: Boolean(slot.hasRedCandle),
+        hasRecorder: Boolean(slot.hasRecorder),
+        hasMagicalRod: Boolean(slot.hasMagicalRod),
+        hasPowerBracelet: Boolean(slot.hasPowerBracelet),
+        hasSteppingLadder: Boolean(slot.hasSteppingLadder),
+        hasFood: Boolean(slot.hasFood),
+        potionTier: slot.potionTier ?? 0,
         hasSword: slot.swordTier > 0,
         hasBoomerang: slot.hasBoomerang,
         hasBow: slot.hasBow,
@@ -318,7 +332,7 @@ export class GameEngine {
       },
     };
 
-    const startScreen = ALL_SCREENS[slot.currentScreen] || ALL_SCREENS.O7_7;
+    const startScreen = this.screens[slot.currentScreen] || this.screens.O7_7;
     this.revealedSecrets.clear();
     this.resetFade();
 
@@ -353,12 +367,12 @@ export class GameEngine {
       console.warn(
         `[GameEngine.loadScreen] Validation Warning: Target screen ID passed to loadScreen is undefined (${screenId})! Falling back to default overworld screen "O7_7"`
       );
-    } else if (!ALL_SCREENS[screenId]) {
+    } else if (!this.screens[screenId]) {
       console.warn(
-        `[GameEngine.loadScreen] Validation Warning: Target screen ID "${screenId}" was not found in ALL_SCREENS! Falling back to default overworld screen "O7_7"`
+        `[GameEngine.loadScreen] Validation Warning: Target screen ID "${screenId}" was not found in this.screens! Falling back to default overworld screen "O7_7"`
       );
     }
-    const screen: ScreenData = (screenId && ALL_SCREENS[screenId]) || ALL_SCREENS.O7_7;
+    const screen: ScreenData = (screenId && this.screens[screenId]) || this.screens.O7_7;
     const targetScreen = screen;
     this.currentScreen = targetScreen;
 
@@ -971,8 +985,9 @@ export class GameEngine {
       this.player.heldItemTimer--;
       if (this.player.heldItemTimer <= 0) {
         this.player.isHoldingItem = false;
+        const collectedTriforce = this.player.heldItemType === ItemType.TRIFORCE;
         this.player.heldItemType = null;
-        if (this.currentScreen.id === 'D1_6' || this.currentScreen.id === 'D2_TRIFORCE') {
+        if (collectedTriforce && (this.currentScreen.id === 'D1_6' || this.currentScreen.id === 'D2_TRIFORCE' || this.currentScreen.id === 'D3_TRIFORCE')) {
           // Victory!
           this.gameState = GameState.VICTORY;
           this.onStateChange?.(GameState.VICTORY);
@@ -2666,7 +2681,7 @@ export class GameEngine {
       this.visitedScreens,
       this.currentScreen,
       secret,
-      ALL_SCREENS
+      this.screens
     );
     this.onVisitedScreensChange?.(updatedVisited);
 
@@ -2727,7 +2742,7 @@ export class GameEngine {
   }
 
   private applySecretToTiles(secret: SecretTrigger) {
-    applySecretDiscoveryToScreen(this.currentScreen, secret, ALL_SCREENS, this.revealedSecrets);
+    applySecretDiscoveryToScreen(this.currentScreen, secret, this.screens, this.revealedSecrets);
   }
 
   private updatePickups() {
@@ -3339,7 +3354,8 @@ export class GameEngine {
             this.activeSlot.id,
             this.player,
             this.currentScreen.id,
-            this.activeSlot.deaths
+            this.activeSlot.deaths,
+            Array.from(this.visitedScreens)
           );
         }
 
@@ -3803,7 +3819,7 @@ export class GameEngine {
     if (this.transition.progress >= 1) {
       this.transition.active = false;
       chiptune.playScreenScrollEnd();
-      const targetScreen = ALL_SCREENS[this.transition.targetScreenId] || ALL_SCREENS.O7_7;
+      const targetScreen = this.screens[this.transition.targetScreenId] || this.screens.O7_7;
 
       let nextX = this.player.x;
       let nextY = this.player.y;
@@ -4403,7 +4419,7 @@ export class GameEngine {
   private renderScreenTransition() {
     const ctx = this.ctx;
     const progress = this.transition.progress;
-    const nextScreen = ALL_SCREENS[this.transition.targetScreenId];
+    const nextScreen = this.screens[this.transition.targetScreenId];
     if (!this.prevScreen || !nextScreen) return;
 
     let prevX = 0, prevY = 0, nextX = 0, nextY = 0;
