@@ -1,0 +1,6 @@
+{
+  "name": "The Legend of Zelda NES",
+  "description": "Authentic 8-bit NES recreation of The Legend of Zelda with chiptune audio, 60fps canvas engine, dynamic outdoor weather effects, touch controls, gamepad support, and local storage save system.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

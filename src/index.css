@@ -1,0 +1,36 @@
+@import "tailwindcss";
+
+.image-rendering-pixelated {
+  image-rendering: pixelated;
+  image-rendering: -moz-crisp-edges;
+  image-rendering: crisp-edges;
+}
+
+/* NES Clip-path heart */
+.clip-heart {
+  clip-path: polygon(
+    50% 15%,
+    65% 0%,
+    85% 0%,
+    100% 15%,
+    100% 40%,
+    50% 90%,
+    0% 40%,
+    0% 15%,
+    15% 0%,
+    35% 0%
+  );
+}
+
+@keyframes nes-blink {
+  0%, 49% {
+    opacity: 1;
+  }
+  50%, 100% {
+    opacity: 0;
+  }
+}
+
+.animate-nes-blink {
+  animation: nes-blink 0.5s infinite steps(1);
+}

@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <rect width="512" height="512" fill="#111118" rx="80"/>
+  <!-- Gold Border -->
+  <rect x="24" y="24" width="464" height="464" fill="none" stroke="#e8b030" stroke-width="16" rx="64"/>
+  <!-- Triforce Piece 1 (Top) -->
+  <polygon points="256,90 176,230 336,230" fill="#ffd700" stroke="#b8860b" stroke-width="8"/>
+  <!-- Triforce Piece 2 (Bottom Left) -->
+  <polygon points="176,230 96,370 256,370" fill="#ffd700" stroke="#b8860b" stroke-width="8"/>
+  <!-- Triforce Piece 3 (Bottom Right) -->
+  <polygon points="336,230 256,370 416,370" fill="#ffd700" stroke="#b8860b" stroke-width="8"/>
+  <!-- Master Sword / Wooden Sword in Center -->
+  <rect x="248" y="220" width="16" height="190" fill="#e0e0e0"/>
+  <polygon points="256,180 244,220 268,220" fill="#ffffff"/>
+  <rect x="226" y="260" width="60" height="12" fill="#c0392b" rx="2"/>
+  <rect x="250" y="410" width="12" height="40" fill="#8e44ad"/>
+  <circle cx="256" cy="460" r="14" fill="#ffd700"/>
+</svg>
