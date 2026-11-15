@@ -167,6 +167,12 @@ export interface PlayerState {
   isHoldingItem: boolean;
   heldItemType: ItemType | null;
   heldItemTimer: number;
+  collectedHeartContainers?: string[];
+  collectedTriforceIds?: string[];
+  defeatedBossRooms?: string[];
+  unlockedBestiary?: EnemyType[];
+  bestiaryDefeatCounts?: Partial<Record<EnemyType, number>>;
+  deaths?: number;
 }
 
 export interface Projectile {
@@ -339,5 +345,10 @@ export interface SaveSlotData {
   deaths: number;
   currentScreen: string;
   visitedScreens?: string[];
+  collectedHeartContainers?: string[];
+  collectedTriforceIds?: string[];
+  defeatedBossRooms?: string[];
+  unlockedBestiary?: EnemyType[];
+  bestiaryDefeatCounts?: Partial<Record<EnemyType, number>>;
   timestamp: number;
 }

@@ -6,7 +6,7 @@ import React, { useState } from 'react';
 import { SaveSlotData } from '../types';
 import { loadAllSaveSlots, saveSlotData, clearSaveSlot } from '../game/saveSystem';
 import { chiptune } from '../audio/chiptune';
-import { Trash2, Plus, Play } from 'lucide-react';
+import { Trash2, Plus, Skull } from 'lucide-react';
 
 interface FileSelectScreenProps {
   onSelectSlot: (slot: SaveSlotData) => void;
@@ -143,8 +143,7 @@ export const FileSelectScreen: React.FC<FileSelectScreenProps> = ({ onSelectSlot
                     </div>
                     {!isEmpty && (
                       <div className="text-[8px] text-gray-400 mt-1 flex gap-3">
-                        <span>DEATHS: {slot.deaths}</span>
-                        <span className="text-[#f8b800]">▲ {slot.triforcePieces}</span>
+                        <span className="text-[#f8b800]">▲ {slot.triforcePieces}/3</span>
                         <span className="text-[#58f898]">◆ {slot.rupees}</span>
                       </div>
                     )}
@@ -158,20 +157,42 @@ export const FileSelectScreen: React.FC<FileSelectScreenProps> = ({ onSelectSlot
                       <span>NEW QUEST</span>
                     </div>
                   ) : (
-                    <div className="flex flex-col items-end">
-                      <div className="flex gap-1">
-                        {Array.from({ length: Math.floor(slot.maxHearts / 2) }).map((_, i) => (
-                          <div
-                            key={i}
-                            className={`w-2.5 h-2.5 ${
-                              i < Math.floor(slot.hearts / 2) ? 'bg-[#d82800]' : 'bg-gray-800'
-                            }`}
-                          />
-                        ))}
+                    <div className="flex items-center gap-2.5">
+                      {/* Per-Save-Slot Death Counter */}
+                      <div
+                        id={`death-counter-slot-${slot.id}`}
+                        data-testid={`death-counter-slot-${slot.id}`}
+                        title={`Deaths recorded in ${slot.name}'s save file`}
+                        className={`flex items-center gap-1.5 px-2 py-1 border text-[8px] ${
+                          (slot.deaths ?? 0) > 0
+                            ? 'border-[#d82800]/80 bg-[#260808] text-[#ff6b57]'
+                            : 'border-gray-700 bg-[#121218] text-gray-300'
+                        }`}
+                      >
+                        <Skull
+                          size={11}
+                          className={(slot.deaths ?? 0) > 0 ? 'text-[#d82800]' : 'text-gray-400'}
+                        />
+                        <span className="tracking-wider">
+                          DEATHS:{String(slot.deaths ?? 0).padStart(2, '0')}
+                        </span>
                       </div>
-                      <span className="text-[7px] text-gray-500 mt-1">
-                        {slot.currentScreen.startsWith('D') ? 'IN DUNGEON' : 'OVERWORLD'}
-                      </span>
+
+                      <div className="flex flex-col items-end">
+                        <div className="flex gap-1">
+                          {Array.from({ length: Math.floor(slot.maxHearts / 2) }).map((_, i) => (
+                            <div
+                              key={i}
+                              className={`w-2.5 h-2.5 ${
+                                i < Math.floor(slot.hearts / 2) ? 'bg-[#d82800]' : 'bg-gray-800'
+                              }`}
+                            />
+                          ))}
+                        </div>
+                        <span className="text-[7px] text-gray-500 mt-1">
+                          {slot.currentScreen.startsWith('D') ? 'IN DUNGEON' : 'OVERWORLD'}
+                        </span>
+                      </div>
                     </div>
                   )}
 

@@ -7,7 +7,10 @@ import { PlayerState, ItemType } from '../types';
 import { chiptune } from '../audio/chiptune';
 import { ControlsConfig } from '../game/controlsConfig';
 import { ControlsSettings } from './ControlsSettings';
-import { Save, Volume2, VolumeX, Play, RotateCcw, Backpack, Settings } from 'lucide-react';
+import { BestiaryPanel } from './BestiaryPanel';
+import { getBestiaryProgress } from '../game/bestiary';
+import { BOSS_TRIFORCE_BATTLES, TOTAL_TRIFORCE_PIECES } from '../game/bossTriforceSystem';
+import { Save, Volume2, VolumeX, Play, RotateCcw, Backpack, Settings, BookOpen } from 'lucide-react';
 
 interface InventoryModalProps {
   player: PlayerState;
@@ -30,9 +33,10 @@ export const InventoryModal: React.FC<InventoryModalProps> = ({
   onSave,
   onQuit,
 }) => {
-  const [activeTab, setActiveTab] = useState<'inventory' | 'settings'>('inventory');
+  const [activeTab, setActiveTab] = useState<'inventory' | 'bestiary' | 'settings'>('inventory');
   const [saveSuccess, setSaveSuccess] = useState(false);
   const isMuted = chiptune.getMuted();
+  const bestiaryProgress = getBestiaryProgress(player.unlockedBestiary);
 
   const selectableItems = [
     {
@@ -122,18 +126,34 @@ export const InventoryModal: React.FC<InventoryModalProps> = ({
           </button>
 
           <button
+            id="tab-bestiary"
+            onClick={() => {
+              chiptune.playKey();
+              setActiveTab('bestiary');
+            }}
+            className={`flex items-center gap-1.5 px-2.5 py-1.5 text-[7.5px] sm:text-[8.5px] border cursor-pointer transition-all ${
+              activeTab === 'bestiary'
+                ? 'border-[#3cbcfc] bg-[#082438] text-[#3cbcfc] font-bold shadow-[0_0_8px_#3cbcfc]'
+                : 'border-gray-700 bg-[#141419] text-gray-400 hover:text-white'
+            }`}
+          >
+            <BookOpen size={12} />
+            <span>BESTIARY ({bestiaryProgress.discovered}/{bestiaryProgress.total})</span>
+          </button>
+
+          <button
             onClick={() => {
               chiptune.playKey();
               setActiveTab('settings');
             }}
-            className={`flex items-center gap-1.5 px-3 py-1.5 text-[8px] sm:text-[9px] border cursor-pointer transition-all ${
+            className={`flex items-center gap-1.5 px-2.5 py-1.5 text-[7.5px] sm:text-[8.5px] border cursor-pointer transition-all ${
               activeTab === 'settings'
                 ? 'border-[#58f898] bg-[#003816] text-[#58f898] font-bold shadow-[0_0_8px_#58f898]'
                 : 'border-gray-700 bg-[#141419] text-gray-400 hover:text-white'
             }`}
           >
             <Settings size={12} />
-            <span>SETTINGS & CONTROLS</span>
+            <span>CONTROLS</span>
             {controlsConfig.showHitboxDebug && (
               <span className="px-1 py-0.2 bg-[#ff3864] text-white text-[6px] font-bold rounded">
                 DBG
@@ -238,16 +258,55 @@ export const InventoryModal: React.FC<InventoryModalProps> = ({
                 <span>MAP</span>
               </div>
 
-              <div className={`p-2 border ${player.inventory.triforcePieces > 0 ? 'border-[#f8b800] bg-[#302500]' : 'border-gray-800 opacity-30'}`}>
-                <div className="text-xl mb-1 text-[#f8b800]">▲</div>
-                <span className="text-[#f8b800]">TRIFORCE ({player.inventory.triforcePieces}/8)</span>
+              <div
+                id="inventory-triforce-card"
+                className={`p-2 border ${player.inventory.triforcePieces > 0 ? 'border-[#f8b800] bg-[#302500]' : 'border-gray-800 opacity-40'}`}
+              >
+                <div className="flex items-center justify-center gap-1.5 mb-1">
+                  {BOSS_TRIFORCE_BATTLES.map((b, idx) => {
+                    const owned =
+                      player.collectedTriforceIds?.includes(b.triforceId) ??
+                      idx < player.inventory.triforcePieces;
+                    return (
+                      <span
+                        key={b.triforceId}
+                        title={b.triforceName}
+                        className={`text-sm leading-none ${
+                          owned ? 'text-[#f8b800]' : 'text-gray-700'
+                        }`}
+                      >
+                        ▲
+                      </span>
+                    );
+                  })}
+                </div>
+                <span className="text-[#f8b800]">
+                  TRIFORCE ({Math.min(TOTAL_TRIFORCE_PIECES, player.inventory.triforcePieces)}/{TOTAL_TRIFORCE_PIECES})
+                </span>
+              </div>
+
+              <div
+                id="inventory-heart-containers-card"
+                className={`p-2 border ${
+                  player.maxHearts > 6
+                    ? 'border-[#d82800] bg-[#2a0808]'
+                    : 'border-gray-700 bg-[#141414]'
+                }`}
+              >
+                <div className="text-xl mb-1 text-[#d82800]">♥</div>
+                <span className="text-[#fcfcfc]">
+                  HEARTS ({Math.floor(player.maxHearts / 2)}/16)
+                </span>
               </div>
             </div>
           </div>
         </div>
       )}
 
-      {/* Tab 2: Settings & Remapping Subscreen */}
+      {/* Tab 2: Enemy Bestiary Subscreen */}
+      {activeTab === 'bestiary' && <BestiaryPanel player={player} />}
+
+      {/* Tab 3: Settings & Remapping Subscreen */}
       {activeTab === 'settings' && (
         <ControlsSettings
           config={controlsConfig}
@@ -258,7 +317,7 @@ export const InventoryModal: React.FC<InventoryModalProps> = ({
 
       {/* Bottom Actions */}
       <div className="border-t-2 border-white pt-3 flex flex-wrap items-center justify-between gap-2">
-        {activeTab === 'inventory' ? (
+        {activeTab === 'inventory' || activeTab === 'bestiary' ? (
           <button
             id="btn-save-progress"
             onClick={handleSaveClick}

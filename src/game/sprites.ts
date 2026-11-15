@@ -1833,13 +1833,21 @@ function drawSteppingLadder(ctx: CanvasRenderingContext2D) {
 }
 
 function drawTriforce(ctx: CanvasRenderingContext2D) {
-  ctx.fillStyle = NES_COLORS.GOLD;
-  // Classic equilateral triangle
+  const pulse = Math.floor(Date.now() / 160) % 2 === 0;
+  // Classic golden equilateral triangle with bright rim & animated NES shimmer
   for (let r = 0; r < 12; r++) {
     const w = r * 2 + 1;
     const startX = 8 - r;
+    ctx.fillStyle = pulse ? NES_COLORS.GOLD : NES_COLORS.OVERWORLD_ROCK_LIGHT;
     ctx.fillRect(startX, 2 + r, w, 1);
   }
+  // Inner inverted dark/bright highlight facet for iconic Triforce relief
+  ctx.fillStyle = pulse ? NES_COLORS.WHITE : NES_COLORS.GOLD;
+  ctx.fillRect(7, 4, 2, 2);
+  ctx.fillRect(6, 7, 4, 1);
+  ctx.fillStyle = NES_COLORS.OVERWORLD_ROCK;
+  ctx.fillRect(6, 9, 4, 1);
+  ctx.fillRect(7, 10, 2, 1);
 }
 
 function drawClock(ctx: CanvasRenderingContext2D) {
@@ -2292,6 +2300,29 @@ export function drawTile(
       ctx.fillRect(x + 3, y + 13, 10, 1);
       ctx.fillRect(x + 7, y + 5, 2, 6);
       ctx.fillRect(x + 5, y + 6, 6, 2);
+      break;
+
+    case 19: // Locked Boss Shutter Gate with Triforce Seal
+      ctx.fillStyle = BLACK;
+      ctx.fillRect(x, y, 16, 16);
+      // Outer steel shutter frame
+      ctx.fillStyle = isDungeon ? DUNGEON_WALL : OVERWORLD_ROCK;
+      ctx.fillRect(x, y, 16, 2);
+      ctx.fillRect(x, y + 14, 16, 2);
+      ctx.fillRect(x, y, 2, 16);
+      ctx.fillRect(x + 14, y, 2, 16);
+      // Vertical iron shutter bars
+      ctx.fillStyle = isDungeon ? DUNGEON_WALL_LIGHT : NES_COLORS.GRAY;
+      ctx.fillRect(x + 3, y + 2, 2, 12);
+      ctx.fillRect(x + 7, y + 2, 2, 12);
+      ctx.fillRect(x + 11, y + 2, 2, 12);
+      // Horizontal locking crossbar
+      ctx.fillStyle = NES_COLORS.GRAY;
+      ctx.fillRect(x + 2, y + 7, 12, 2);
+      // Glowing golden Triforce lock crest
+      ctx.fillStyle = animTick % 2 === 0 ? NES_COLORS.GOLD : WHITE;
+      ctx.fillRect(x + 7, y + 5, 2, 2);
+      ctx.fillRect(x + 6, y + 7, 4, 3);
       break;
 
     default:

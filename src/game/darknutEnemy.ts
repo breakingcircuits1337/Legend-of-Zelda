@@ -1,24 +1,22 @@
 /**
- * The Legend of Zelda NES - Darknut Enemy Subclass
+ * The Legend of Zelda NES - Darknut Enemy Subclass (State-Based AI Controller)
  *
- * Implements the heavily armored Darknut knight:
- * 1. High Health & Frontal Shield:
- *    - Red Darknuts carry 4 HP and deal 1 half-heart contact damage.
- *    - Blue Darknuts carry 8 HP and deal 2 half-hearts (1 full heart) damage.
- *    - Blocks sword strikes and sword beams hitting its frontal shield, forcing
- *      tactical flanking or bomb play.
- * 2. Armored Patrol:
- *    - Marches steadily around the screen along cardinal lanes, turning cleanly
- *      at corners and obstacles.
- * 3. Proximity Turn & Charge:
- *    - When Link enters detection range (or unobstructed line of sight), the
- *      Darknut turns directly toward Link, telegraphs briefly, and launches an
- *      armored charge with wall-sliding pursuit before recovering.
+ * Implements the heavily armored Darknut knight using a formal Finite State Machine
+ * (`StateMachineAIController`) with four tactical states:
+ * 1. `patrol`  (`tactical_lane_patrol`): Marches along cardinal corridors, biasing turns
+ *    toward Link's lane/corridor rather than wandering aimlessly like an Octorok.
+ * 2. `windup`  (`shield_brace_windup`): Halts, turns its shield directly toward Link,
+ *    and telegraphs a heavy charge when Link enters range or an open cardinal corridor.
+ * 3. `charge`  (`wall_slide_armored_charge`): High-speed armored lunge with periodic
+ *    heading re-alignment and secondary-axis wall-sliding around dungeon blocks.
+ * 4. `recover` (`guard_recovery`): Brief post-charge stance before resuming patrol,
+ *    with immediate counter-charge reactions if struck on the shield or flank.
  */
 
 import { Direction, EnemyType, PlayerState } from '../types';
 import { BaseEnemy } from './octorokEnemy';
 import { ParticleSystem } from './particles';
+import { StateMachineAIController } from './stateAIController';
 
 export type TileCollisionFn = (x: number, y: number, w: number, h: number) => boolean;
 
@@ -41,9 +39,50 @@ export interface DarknutEnemyOptions {
   chargeRange?: number;
 }
 
+export interface DarknutAIContext {
+  player: PlayerState;
+  distToPlayer: number;
+  checkTileCollision: TileCollisionFn;
+  audio?: DarknutAudio;
+  particles?: ParticleSystem;
+}
+
+const NO_OP_COLLISION: TileCollisionFn = () => false;
+
+const FALLBACK_PLAYER: PlayerState = {
+  x: 120,
+  y: 88,
+  dir: Direction.UP,
+  moving: false,
+  isAttacking: false,
+  attackTimer: 0,
+  animFrame: 0,
+  animTimer: 0,
+  hearts: 6,
+  maxHearts: 6,
+  swordTier: 1,
+  bItem: 0 as any,
+  inventory: {
+    hasSword: true,
+    hasBoomerang: false,
+    hasBow: false,
+    hasCandle: false,
+    hasCompass: false,
+    hasDungeonMap: false,
+    rupees: 0,
+    bombs: 0,
+    keys: 0,
+    triforcePieces: 0,
+  },
+  invincibleTimer: 0,
+  knockback: null,
+  isHoldingItem: false,
+  heldItemType: null,
+  heldItemTimer: 0,
+};
+
 export class DarknutEnemy extends BaseEnemy {
-  public darknutState: DarknutState = 'patrol';
-  public stateTimer: number = 0;
+  public readonly aiController: StateMachineAIController<DarknutState, DarknutAIContext>;
   public chargeCooldown: number = 0;
   public chargeReaimTimer: number = 0;
   public isBlueVariant: boolean;
@@ -71,6 +110,214 @@ export class DarknutEnemy extends BaseEnemy {
     this.meleeDamage = isBlue ? 2 : 1;
     this.behaviorState = 'patrol';
     this.actionTimer = 45 + Math.floor(Math.random() * 50);
+
+    this.aiController = this.createAIController();
+    this.syncCustomData();
+  }
+
+  public get darknutState(): DarknutState {
+    return this.aiController.currentState;
+  }
+
+  public set darknutState(state: DarknutState) {
+    this.aiController.forceState(state);
+    this.syncCustomData();
+  }
+
+  public get stateTimer(): number {
+    return this.aiController.stateTimer;
+  }
+
+  public set stateTimer(value: number) {
+    this.aiController.stateTimer = value;
+  }
+
+  private syncCustomData(): void {
+    this.customData.darknutState = this.aiController.currentState;
+    this.customData.aiPattern = this.aiController.getCurrentPatternTag();
+    this.customData.aiTransitions = this.aiController.transitionCount;
+  }
+
+  private createAIController(): StateMachineAIController<DarknutState, DarknutAIContext> {
+    return new StateMachineAIController<DarknutState, DarknutAIContext>({
+      controllerName: 'DarknutTacticalFSM',
+      initialState: 'patrol',
+      initialTimer: 0,
+      states: {
+        patrol: {
+          name: 'patrol',
+          patternTag: 'tactical_lane_patrol',
+          onEnter: () => {
+            this.behaviorState = 'patrol';
+            this.actionTimer = 35 + Math.floor(Math.random() * 45);
+          },
+          onUpdate: (ctx, controller) => {
+            this.behaviorState = 'patrol';
+
+            // Heavy armored stride animation
+            this.animTimer++;
+            if (this.animTimer > 9) {
+              this.animFrame = (this.animFrame + 1) % 2;
+              this.animTimer = 0;
+            }
+
+            // Detect player in close proximity, unobstructed LOS, or aligned down an open corridor lane
+            const laneAligned =
+              Math.abs(ctx.player.x - this.x) <= 12 ||
+              Math.abs(ctx.player.y - this.y) <= 12;
+            const spottedInRange =
+              ctx.distToPlayer <= this.chargeRange ||
+              (ctx.distToPlayer <= this.chargeRange * 1.4 &&
+                this.hasClearLineOfSight(ctx.player, ctx.checkTileCollision)) ||
+              (laneAligned &&
+                ctx.distToPlayer <= this.chargeRange * 1.6 &&
+                this.hasClearLineOfSight(ctx.player, ctx.checkTileCollision));
+
+            if (this.chargeCooldown <= 0 && spottedInRange) {
+              controller.transitionTo('windup', ctx, 'player_spotted');
+              return;
+            }
+
+            // Periodic tactical lane turn
+            this.actionTimer--;
+            if (this.actionTimer <= 0) {
+              this.pickTacticalPatrolDirection(ctx.player, ctx.checkTileCollision);
+              this.actionTimer = 45 + Math.floor(Math.random() * 55);
+            }
+
+            // Advance along current cardinal lane
+            const [vx, vy] = this.getCardinalVelocity(this.dir, this.speed);
+            const nextX = this.x + vx;
+            const nextY = this.y + vy;
+
+            if (
+              !this.isOutOfBounds(nextX, nextY) &&
+              !ctx.checkTileCollision(nextX, nextY, 14, 14)
+            ) {
+              this.x = nextX;
+              this.y = nextY;
+            } else {
+              this.pickTacticalPatrolDirection(ctx.player, ctx.checkTileCollision);
+              this.actionTimer = 35 + Math.floor(Math.random() * 35);
+            }
+          },
+        },
+
+        windup: {
+          name: 'windup',
+          patternTag: 'shield_brace_windup',
+          onEnter: (ctx, _prev, controller) => {
+            this.dir = this.getDirectionTowardPlayer(ctx.player);
+            this.behaviorState = 'windup';
+            controller.stateTimer = 14;
+            this.alertTimer = 18;
+            ctx.audio?.playEnemyAlert?.();
+          },
+          onUpdate: (ctx, controller) => {
+            // Track Link's movement with frontal shield raised while bracing
+            this.dir = this.getDirectionTowardPlayer(ctx.player);
+            controller.stateTimer--;
+
+            if (controller.stateTimer <= 0) {
+              controller.transitionTo('charge', ctx, 'windup_complete');
+            }
+          },
+        },
+
+        charge: {
+          name: 'charge',
+          patternTag: 'wall_slide_armored_charge',
+          onEnter: (ctx, _prev, controller) => {
+            this.dir = this.getDirectionTowardPlayer(ctx.player);
+            this.behaviorState = 'attack';
+            controller.stateTimer = 42;
+            this.chargeReaimTimer = 10;
+            ctx.audio?.playMeleeLunge?.();
+            ctx.particles?.emitEmberPuff(this.x + 8, this.y + 8);
+          },
+          onUpdate: (ctx, controller) => {
+            controller.stateTimer--;
+            this.chargeReaimTimer--;
+
+            // Rapid armored footsteps
+            this.animTimer++;
+            if (this.animTimer > 4) {
+              this.animFrame = (this.animFrame + 1) % 2;
+              this.animTimer = 0;
+            }
+
+            // Periodically re-align cardinal heading toward Link during the charge
+            if (this.chargeReaimTimer <= 0) {
+              this.dir = this.getDirectionTowardPlayer(ctx.player);
+              this.chargeReaimTimer = 10;
+            }
+
+            const dx = ctx.player.x - this.x;
+            const dy = ctx.player.y - this.y;
+            const primaryDir = this.dir;
+            const secondaryDir =
+              primaryDir === Direction.LEFT || primaryDir === Direction.RIGHT
+                ? dy >= 0
+                  ? Direction.DOWN
+                  : Direction.UP
+                : dx >= 0
+                  ? Direction.RIGHT
+                  : Direction.LEFT;
+
+            const [pvx, pvy] = this.getCardinalVelocity(primaryDir, this.chargeSpeed);
+            const pnx = this.x + pvx;
+            const pny = this.y + pvy;
+
+            if (
+              !this.isOutOfBounds(pnx, pny) &&
+              !ctx.checkTileCollision(pnx, pny, 14, 14)
+            ) {
+              this.x = pnx;
+              this.y = pny;
+            } else {
+              // Tactical wall-slide along secondary axis toward Link
+              const [svx, svy] = this.getCardinalVelocity(secondaryDir, this.chargeSpeed);
+              const snx = this.x + svx;
+              const sny = this.y + svy;
+
+              if (
+                !this.isOutOfBounds(snx, sny) &&
+                !ctx.checkTileCollision(snx, sny, 14, 14)
+              ) {
+                this.x = snx;
+                this.y = sny;
+                this.dir = secondaryDir;
+              } else {
+                controller.transitionTo('recover', ctx, 'wall_impact');
+                return;
+              }
+            }
+
+            if (controller.stateTimer <= 0) {
+              controller.transitionTo('recover', ctx, 'charge_expired');
+            } else if (ctx.distToPlayer > this.chargeRange * 2.1) {
+              controller.transitionTo('recover', ctx, 'target_out_of_range');
+            }
+          },
+        },
+
+        recover: {
+          name: 'recover',
+          patternTag: 'guard_recovery',
+          onEnter: (_ctx, _prev, controller) => {
+            this.behaviorState = 'patrol';
+            controller.stateTimer = 20;
+            this.chargeCooldown = 42;
+          },
+          onUpdate: (ctx, controller) => {
+            controller.stateTimer--;
+            if (controller.stateTimer <= 0) {
+              controller.transitionTo('patrol', ctx, 'recovery_complete');
+            }
+          },
+        },
+      },
+    });
   }
 
   /**
@@ -105,23 +352,15 @@ export class DarknutEnemy extends BaseEnemy {
 
     const distToPlayer = Math.hypot(player.x - this.x, player.y - this.y);
 
-    switch (this.darknutState) {
-      case 'patrol':
-        this.updatePatrol(player, distToPlayer, checkTileCollision, audio);
-        break;
+    this.aiController.update({
+      player,
+      distToPlayer,
+      checkTileCollision,
+      audio,
+      particles,
+    });
 
-      case 'windup':
-        this.updateWindup(player, audio, particles);
-        break;
-
-      case 'charge':
-        this.updateCharge(player, distToPlayer, checkTileCollision);
-        break;
-
-      case 'recover':
-        this.updateRecover();
-        break;
-    }
+    this.syncCustomData();
 
     // Contact melee damage against Link
     const contactDist = Math.hypot(this.x - player.x, this.y - player.y);
@@ -131,66 +370,21 @@ export class DarknutEnemy extends BaseEnemy {
   }
 
   /**
-   * Armored patrol movement across the room:
-   * Scans for Link within charge range; if spotted, turns toward Link to charge.
-   */
-  private updatePatrol(
-    player: PlayerState,
-    distToPlayer: number,
-    checkTileCollision: TileCollisionFn,
-    audio?: DarknutAudio
-  ): void {
-    this.behaviorState = 'patrol';
-
-    // Heavy armored stride animation
-    this.animTimer++;
-    if (this.animTimer > 9) {
-      this.animFrame = (this.animFrame + 1) % 2;
-      this.animTimer = 0;
-    }
-
-    // Detect player within range (or slightly further with clear line of sight)
-    const spottedInRange =
-      distToPlayer <= this.chargeRange ||
-      (distToPlayer <= this.chargeRange * 1.4 &&
-        this.hasClearLineOfSight(player, checkTileCollision));
-
-    if (this.chargeCooldown <= 0 && spottedInRange) {
-      this.startChargeWindup(player, audio);
-      return;
-    }
-
-    // Periodic cardinal turn
-    this.actionTimer--;
-    if (this.actionTimer <= 0) {
-      this.pickOpenDirection(checkTileCollision);
-      this.actionTimer = 45 + Math.floor(Math.random() * 55);
-    }
-
-    // Advance along current direction
-    const [vx, vy] = this.getCardinalVelocity(this.dir, this.speed);
-    const nextX = this.x + vx;
-    const nextY = this.y + vy;
-
-    if (!this.isOutOfBounds(nextX, nextY) && !checkTileCollision(nextX, nextY, 14, 14)) {
-      this.x = nextX;
-      this.y = nextY;
-    } else {
-      this.pickOpenDirection(checkTileCollision);
-      this.actionTimer = 35 + Math.floor(Math.random() * 35);
-    }
-  }
-
-  /**
-   * Turns directly toward Link and initiates charge windup telegraph.
+   * Turns directly toward Link and initiates charge windup telegraph via the FSM controller.
    */
   public startChargeWindup(player: PlayerState, audio?: DarknutAudio): void {
-    this.dir = this.getDirectionTowardPlayer(player);
-    this.darknutState = 'windup';
-    this.behaviorState = 'windup';
-    this.stateTimer = 14;
-    this.alertTimer = 18;
-    audio?.playEnemyAlert?.();
+    const distToPlayer = Math.hypot(player.x - this.x, player.y - this.y);
+    this.aiController.transitionTo(
+      'windup',
+      {
+        player,
+        distToPlayer,
+        checkTileCollision: NO_OP_COLLISION,
+        audio,
+      },
+      'manual_windup'
+    );
+    this.syncCustomData();
   }
 
   /**
@@ -199,7 +393,18 @@ export class DarknutEnemy extends BaseEnemy {
   public onShieldBlock(player: PlayerState, audio?: DarknutAudio): void {
     this.dir = this.getDirectionTowardPlayer(player);
     if (this.darknutState === 'patrol' || this.darknutState === 'recover') {
-      this.startChargeWindup(player, audio);
+      const distToPlayer = Math.hypot(player.x - this.x, player.y - this.y);
+      this.aiController.transitionTo(
+        'windup',
+        {
+          player,
+          distToPlayer,
+          checkTileCollision: NO_OP_COLLISION,
+          audio,
+        },
+        'shield_deflect_counter'
+      );
+      this.syncCustomData();
     } else {
       this.alertTimer = 16;
     }
@@ -211,120 +416,41 @@ export class DarknutEnemy extends BaseEnemy {
   public onDamaged(player: PlayerState, audio?: DarknutAudio): void {
     this.dir = this.getDirectionTowardPlayer(player);
     this.chargeCooldown = 0;
-    this.startChargeWindup(player, audio);
-  }
-
-  private updateWindup(
-    player: PlayerState,
-    audio?: DarknutAudio,
-    particles?: ParticleSystem
-  ): void {
-    // Keep facing the player while bracing to charge
-    this.dir = this.getDirectionTowardPlayer(player);
-    this.stateTimer--;
-
-    if (this.stateTimer <= 0) {
-      this.launchCharge(player, audio, particles);
-    }
+    const distToPlayer = Math.hypot(player.x - this.x, player.y - this.y);
+    this.aiController.transitionTo(
+      'windup',
+      {
+        player,
+        distToPlayer,
+        checkTileCollision: NO_OP_COLLISION,
+        audio,
+      },
+      'damaged_counter'
+    );
+    this.syncCustomData();
   }
 
   /**
-   * Transitions from windup into an active armored charge toward the player.
+   * Transitions from windup into an active armored charge toward the player via the FSM controller.
    */
   public launchCharge(
     player: PlayerState,
     audio?: DarknutAudio,
     particles?: ParticleSystem
   ): void {
-    this.dir = this.getDirectionTowardPlayer(player);
-    this.darknutState = 'charge';
-    this.behaviorState = 'attack';
-    this.stateTimer = 42;
-    this.chargeReaimTimer = 10;
-
-    audio?.playMeleeLunge?.();
-    particles?.emitEmberPuff(this.x + 8, this.y + 8);
-  }
-
-  /**
-   * High-speed armored charge toward Link with tactical axis wall-sliding.
-   */
-  private updateCharge(
-    player: PlayerState,
-    distToPlayer: number,
-    checkTileCollision: TileCollisionFn
-  ): void {
-    this.stateTimer--;
-    this.chargeReaimTimer--;
-
-    // Rapid armored footsteps
-    this.animTimer++;
-    if (this.animTimer > 4) {
-      this.animFrame = (this.animFrame + 1) % 2;
-      this.animTimer = 0;
-    }
-
-    // Periodically re-align cardinal heading toward Link during the charge
-    if (this.chargeReaimTimer <= 0) {
-      this.dir = this.getDirectionTowardPlayer(player);
-      this.chargeReaimTimer = 10;
-    }
-
-    const dx = player.x - this.x;
-    const dy = player.y - this.y;
-    const primaryDir = this.dir;
-    const secondaryDir =
-      primaryDir === Direction.LEFT || primaryDir === Direction.RIGHT
-        ? dy >= 0
-          ? Direction.DOWN
-          : Direction.UP
-        : dx >= 0
-          ? Direction.RIGHT
-          : Direction.LEFT;
-
-    const [pvx, pvy] = this.getCardinalVelocity(primaryDir, this.chargeSpeed);
-    const pnx = this.x + pvx;
-    const pny = this.y + pvy;
-
-    if (!this.isOutOfBounds(pnx, pny) && !checkTileCollision(pnx, pny, 14, 14)) {
-      this.x = pnx;
-      this.y = pny;
-    } else {
-      // Tactical wall-slide along secondary axis toward Link
-      const [svx, svy] = this.getCardinalVelocity(secondaryDir, this.chargeSpeed);
-      const snx = this.x + svx;
-      const sny = this.y + svy;
-
-      if (!this.isOutOfBounds(snx, sny) && !checkTileCollision(snx, sny, 14, 14)) {
-        this.x = snx;
-        this.y = sny;
-        this.dir = secondaryDir;
-      } else {
-        // Halted by corner/wall: enter brief recovery
-        this.enterRecover();
-        return;
-      }
-    }
-
-    if (this.stateTimer <= 0 || distToPlayer > this.chargeRange * 2.1) {
-      this.enterRecover();
-    }
-  }
-
-  private enterRecover(): void {
-    this.darknutState = 'recover';
-    this.behaviorState = 'patrol';
-    this.stateTimer = 20;
-    this.chargeCooldown = 42;
-  }
-
-  private updateRecover(): void {
-    this.stateTimer--;
-    if (this.stateTimer <= 0) {
-      this.darknutState = 'patrol';
-      this.behaviorState = 'patrol';
-      this.actionTimer = 35 + Math.floor(Math.random() * 40);
-    }
+    const distToPlayer = Math.hypot(player.x - this.x, player.y - this.y);
+    this.aiController.transitionTo(
+      'charge',
+      {
+        player,
+        distToPlayer,
+        checkTileCollision: NO_OP_COLLISION,
+        audio,
+        particles,
+      },
+      'manual_charge'
+    );
+    this.syncCustomData();
   }
 
   /**
@@ -365,7 +491,14 @@ export class DarknutEnemy extends BaseEnemy {
     return true;
   }
 
-  private pickOpenDirection(checkTileCollision: TileCollisionFn): void {
+  /**
+   * Picks an open cardinal corridor direction, favoring turning away from blocked tiles
+   * and closing onto Link's X/Y lane rather than purely random wandering.
+   */
+  private pickTacticalPatrolDirection(
+    player: PlayerState,
+    checkTileCollision: TileCollisionFn
+  ): void {
     const dirs = [Direction.UP, Direction.DOWN, Direction.LEFT, Direction.RIGHT];
     const openDirs = dirs.filter((d) => {
       const [vx, vy] = this.getCardinalVelocity(d, 4);
@@ -377,6 +510,14 @@ export class DarknutEnemy extends BaseEnemy {
     if (openDirs.length > 0) {
       const others = openDirs.filter((d) => d !== this.dir);
       const pool = others.length > 0 ? others : openDirs;
+
+      // Score open directions by how much they align with or narrow distance to Link's lane
+      const preferred = this.getDirectionTowardPlayer(player);
+      if (pool.includes(preferred) && Math.random() < 0.7) {
+        this.dir = preferred;
+        return;
+      }
+
       this.dir = pool[Math.floor(Math.random() * pool.length)];
     } else {
       this.dir = this.getOppositeDirection(this.dir);
@@ -411,5 +552,12 @@ export class DarknutEnemy extends BaseEnemy {
       case Direction.RIGHT:
         return Direction.LEFT;
     }
+  }
+
+  /**
+   * Unused fallback player getter kept private for default contexts if needed.
+   */
+  protected static getDefaultPlayer(): PlayerState {
+    return FALLBACK_PLAYER;
   }
 }

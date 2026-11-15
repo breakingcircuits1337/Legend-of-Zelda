@@ -6,6 +6,7 @@ import React from 'react';
 import { PlayerState, ScreenData, ItemType } from '../types';
 import { OverworldMinimap } from './OverworldMinimap';
 import { AnimatedHearts } from './AnimatedHearts';
+import { Map } from 'lucide-react';
 
 interface HUDProps {
   player: PlayerState;
@@ -25,9 +26,9 @@ export const HUD: React.FC<HUDProps> = ({
   return (
     <div
       id="nes-hud-bar"
-      className="w-full bg-black text-white px-3 py-2 border-b-2 border-[#202020] select-none flex items-center justify-between text-[9px] font-['Press_Start_2P',monospace] leading-tight"
+      className="w-full bg-black text-white px-3 py-2 border-b-2 border-[#202020] select-none flex items-center justify-between text-[9px] font-['Press_Start_2P',monospace] leading-tight gap-1.5"
     >
-      {/* Left: 8x8 Transparent Overworld Minimap Sub-Component with Fog-of-War */}
+      {/* Left: 16x8 Transparent Overworld Minimap Sub-Component with Fog-of-War */}
       <OverworldMinimap
         currentScreen={currentScreen}
         showOverlay={showGridOverlay}
@@ -51,7 +52,7 @@ export const HUD: React.FC<HUDProps> = ({
         </div>
       </div>
 
-      {/* Equipped Weapon Slots: B and A */}
+      {/* Equipped Weapon Slots: B and A + Mini-Map Overlay Button */}
       <div className="flex items-center gap-2">
         {/* B Item Slot */}
         <div className="flex flex-col items-center">
@@ -76,6 +77,32 @@ export const HUD: React.FC<HUDProps> = ({
             )}
           </div>
         </div>
+
+        {/* Persistent 16x8 Mini-Map Overlay Toggle Button */}
+        {onToggleGridOverlay && (
+          <div className="flex flex-col items-center">
+            <span className="text-gray-400 text-[7px] mb-0.5">MAP</span>
+            <button
+              id="hud-minimap-toggle-btn"
+              type="button"
+              onClick={onToggleGridOverlay}
+              aria-pressed={showGridOverlay}
+              title={
+                showGridOverlay
+                  ? 'Hide Persistent 16x8 Mini-Map Overlay (G / M)'
+                  : 'Show Persistent 16x8 Mini-Map Overlay (G / M)'
+              }
+              className={`w-8 h-9 border-2 flex flex-col items-center justify-center gap-0.5 cursor-pointer transition-colors ${
+                showGridOverlay
+                  ? 'border-[#58f898] bg-[#153528] text-[#58f898] shadow-[0_0_8px_rgba(88,248,152,0.5)]'
+                  : 'border-gray-500 bg-black text-gray-300 hover:border-white hover:text-white'
+              }`}
+            >
+              <Map size={11} />
+              <span className="text-[5px] leading-none">16x8</span>
+            </button>
+          </div>
+        )}
       </div>
 
       {/* Right: Animated —LIFE— Hearts */}

@@ -4,6 +4,7 @@
  */
 
 import { ScreenData, EnemyType, ItemType, SecretTrigger, Direction } from '../types';
+import { buildExpandedOverworldScreens } from './overworldExpansion';
 
 /**
  * Helper to generate an overworld screen border
@@ -140,7 +141,7 @@ export const SCREEN_O7_6 = createScreen(
   'River Crossing',
   'overworld',
   'overworld',
-  { down: 'O7_7', up: 'O7_5', right: 'O8_6' },
+  { down: 'O7_7', up: 'O7_5', left: 'O6_6', right: 'O8_6' },
   [
     { type: EnemyType.MOBLIN_RED, x: 64, y: 80 },
     { type: EnemyType.OCTOROK_RED, x: 176, y: 80 },
@@ -186,7 +187,7 @@ export const SCREEN_O7_5 = createScreen(
   'Goblin Forest',
   'overworld',
   'overworld',
-  { down: 'O7_6', up: 'O7_4' },
+  { down: 'O7_6', up: 'O7_4', left: 'O6_5', right: 'O8_5' },
   [
     { type: EnemyType.MOBLIN_RED, x: 60, y: 50 },
     { type: EnemyType.MOBLIN_RED, x: 180, y: 90 },
@@ -327,18 +328,20 @@ export const SCREEN_O8_7 = createScreen(
   'Eastern Coast',
   'overworld',
   'overworld',
-  { left: 'O7_7', up: 'O8_6' },
+  { left: 'O7_7', right: 'O9_7', up: 'O8_6' },
   [
     { type: EnemyType.MOBLIN_RED, x: 80, y: 60 },
     { type: EnemyType.OCTOROK_BLUE, x: 140, y: 90 },
     { type: EnemyType.MOBLIN_RED, x: 180, y: 60 },
   ],
   (t) => {
-    // Ocean on right side
+    // Ocean on right side with wooden coastal bridge crossing east into O9_7
     for (let r = 1; r < 10; r++) {
       t[r][13] = 3;
       t[r][14] = 3;
     }
+    t[5][13] = 11; t[5][14] = 11; t[5][15] = 11;
+    t[6][13] = 11; t[6][14] = 11; t[6][15] = 11;
     t[3][6] = 2;
     t[3][7] = 13; // Bombable Rock at (3, 7)!
     t[7][5] = 1; t[7][6] = 1;
@@ -537,6 +540,9 @@ export const SCREEN_D1_5 = createScreen(
     { type: EnemyType.AQUAMENTUS, x: 175, y: 65 }, // Boss Dragon!
   ],
   (t) => {
+    // East Boss Gate to Triforce Room stays locked until Aquamentus is defeated
+    t[5][15] = 19;
+    t[6][15] = 19;
     t[2][3] = 5; t[2][12] = 5;
     t[8][3] = 5; t[8][12] = 5;
   }
@@ -791,16 +797,18 @@ export const SCREEN_O5_7 = createScreen(
   'Western Desert',
   'overworld',
   'overworld',
-  { right: 'O6_7', up: 'O5_6', cave: 'C_SHOP' },
+  { right: 'O6_7', left: 'O4_7', up: 'O5_6', cave: 'C_SHOP' },
   [
     { type: EnemyType.LEEVER_RED, x: 70, y: 50 },
     { type: EnemyType.LEEVER_RED, x: 150, y: 80 },
     { type: EnemyType.LEEVER_RED, x: 110, y: 120 },
   ],
   (t) => {
-    // Sand path across screen
+    // Sand path across screen (rows 5-6 extend through west/east exits)
     for (let c = 0; c < 16; c++) {
-      t[4][c] = 11; t[5][c] = 11; t[6][c] = 11;
+      if (c > 0 && c < 15) t[4][c] = 11;
+      t[5][c] = 11;
+      t[6][c] = 11;
     }
     // Rocky cave structure
     t[2][7] = 2; t[2][8] = 2;
@@ -815,7 +823,7 @@ export const SCREEN_O5_6 = createScreen(
   'Haunted Graveyard',
   'overworld',
   'overworld',
-  { down: 'O5_7', left: 'O4_6' },
+  { up: 'O5_5', down: 'O5_7', left: 'O4_6', right: 'O6_6' },
   [
     { type: EnemyType.GHINI, x: 64, y: 32 },
     { type: EnemyType.GHINI, x: 176, y: 64 },
@@ -827,7 +835,7 @@ export const SCREEN_O5_6 = createScreen(
       if (t[5][c] === 0) t[5][c] = 11;
       if (t[6][c] === 0) t[6][c] = 11;
     }
-    for (let r = 1; r < 11; r++) {
+    for (let r = 0; r < 11; r++) {
       if (t[r][7] === 0) t[r][7] = 11;
       if (t[r][8] === 0) t[r][8] = 11;
     }
@@ -849,7 +857,7 @@ export const SCREEN_O4_6 = createScreen(
   'Ancient Cemetery',
   'overworld',
   'overworld',
-  { right: 'O5_6' },
+  { up: 'O4_5', left: 'O3_6', right: 'O5_6', down: 'O4_7' },
   [
     { type: EnemyType.GHINI, x: 80, y: 32 },
     { type: EnemyType.GHINI, x: 160, y: 32 },
@@ -858,11 +866,11 @@ export const SCREEN_O4_6 = createScreen(
   ],
   (t) => {
     // Cemetery sand paths
-    for (let c = 1; c < 16; c++) {
+    for (let c = 0; c < 16; c++) {
       t[5][c] = 11;
       t[6][c] = 11;
     }
-    for (let r = 1; r < 10; r++) {
+    for (let r = 0; r < 11; r++) {
       t[r][7] = 11;
       t[r][8] = 11;
     }
@@ -875,6 +883,37 @@ export const SCREEN_O4_6 = createScreen(
         t[r][c] = 18;
       }
     }
+  }
+);
+
+// Screen O4_7: Southwest Wilds (West of Western Desert, South of Ancient Cemetery)
+export const SCREEN_O4_7 = createScreen(
+  'O4_7',
+  'Southwest Wilds',
+  'overworld',
+  'overworld',
+  { left: 'O3_7', right: 'O5_7', up: 'O4_6' },
+  [
+    { type: EnemyType.PEAHAT, x: 72, y: 56 },
+    { type: EnemyType.TEKTITE_RED, x: 152, y: 108 },
+    { type: EnemyType.OCTOROK_BLUE, x: 104, y: 40 },
+  ],
+  (t) => {
+    // East-west sand road into Western Desert (O5_7) and Heart Piece Coast (O3_7), plus north path to O4_6
+    for (let c = 0; c < 16; c++) {
+      t[5][c] = 11;
+      t[6][c] = 11;
+    }
+    for (let r = 0; r < 9; r++) {
+      t[r][7] = 11;
+      t[r][8] = 11;
+    }
+
+    // Wilds trees, boulders, and oasis pond
+    t[2][2] = 1; t[2][3] = 1; t[3][2] = 1;
+    t[2][12] = 2; t[2][13] = 2; t[3][12] = 2;
+    t[8][3] = 3; t[8][4] = 3; t[9][3] = 3; t[9][4] = 3;
+    t[8][11] = 1; t[8][12] = 1;
   }
 );
 
@@ -914,17 +953,19 @@ export const SCREEN_O8_6 = createScreen(
   'Coastal Headland',
   'overworld',
   'overworld',
-  { down: 'O8_7', left: 'O7_6', up: 'O8_5' },
+  { down: 'O8_7', left: 'O7_6', right: 'O9_6', up: 'O8_5' },
   [
     { type: EnemyType.PEAHAT, x: 70, y: 60 },
     { type: EnemyType.MOBLIN_RED, x: 150, y: 80 },
     { type: EnemyType.MOBLIN_BLUE, x: 100, y: 110 },
   ],
   (t) => {
-    // Ocean on right
+    // Ocean on right with causeway bridge east into O9_6
     for (let r = 0; r < 11; r++) {
       t[r][13] = 3; t[r][14] = 3; t[r][15] = 3;
     }
+    t[5][13] = 11; t[5][14] = 11; t[5][15] = 11;
+    t[6][13] = 11; t[6][14] = 11; t[6][15] = 11;
     // Forest glade on left with burnable bush
     t[3][4] = 1; t[3][5] = 1;
     t[4][4] = 1; t[4][5] = 12; // Burnable bush at (4, 5)!
@@ -980,7 +1021,7 @@ export const SCREEN_O6_6 = createScreen(
   'Whispering Lake',
   'overworld',
   'overworld',
-  { down: 'O6_7', dungeon: 'D2_1', up: 'D2_1' },
+  { down: 'O6_7', left: 'O5_6', right: 'O7_6', dungeon: 'D2_1', up: 'D2_1' },
   [
     { type: EnemyType.OCTOROK_BLUE, x: 60, y: 80 },
     { type: EnemyType.OCTOROK_BLUE, x: 180, y: 80 },
@@ -1089,7 +1130,9 @@ export const SCREEN_D2_BOSS = createScreen(
     { type: EnemyType.DODONGO, x: 110, y: 70 },
   ],
   (t) => {
-    // Open boss arena
+    // North Boss Gate to Triforce Altar stays locked until Dodongo is defeated
+    t[0][7] = 19;
+    t[0][8] = 19;
     t[3][4] = 5; t[3][11] = 5;
     t[7][4] = 5; t[7][11] = 5;
   }
@@ -1126,7 +1169,7 @@ export const SCREEN_O8_5 = createScreen(
   'Level 3: The Manji Glade',
   'overworld',
   'overworld',
-  { down: 'O8_6', dungeon: 'D3_1', up: 'D3_1' },
+  { down: 'O8_6', left: 'O7_5', right: 'O9_5', dungeon: 'D3_1', up: 'D3_1' },
   [
     { type: EnemyType.ROPE, x: 70, y: 80 },
     { type: EnemyType.MOBLIN_RED, x: 170, y: 90 },
@@ -1313,8 +1356,8 @@ export const SCREEN_D3_BOSS = createScreen(
   ],
   (t) => {
     t[10][7] = 6; t[10][8] = 6; // South entrance
-    // North door is locked until Manhandla is slain
-    t[0][7] = 5; t[0][8] = 5;
+    // North Boss Gate to Triforce Altar stays locked until Manhandla is slain
+    t[0][7] = 19; t[0][8] = 19;
     t[3][4] = 5; t[3][11] = 5;
     t[7][4] = 5; t[7][11] = 5;
   }
@@ -1343,8 +1386,8 @@ export const SCREEN_D3_TRIFORCE: ScreenData = {
   enemies: [],
 };
 
-// Master dictionary of all screens
-export const ALL_SCREENS: Record<string, ScreenData> = {
+// Master dictionary of all screens (handcrafted rooms + full 16x8 overworld)
+export const ALL_SCREENS: Record<string, ScreenData> = buildExpandedOverworldScreens({
   O7_7: SCREEN_O7_7,
   C_START: SCREEN_CAVE_START,
   O7_6: SCREEN_O7_6,
@@ -1353,6 +1396,7 @@ export const ALL_SCREENS: Record<string, ScreenData> = {
   O6_7: SCREEN_O6_7,
   O8_7: SCREEN_O8_7,
   O5_7: SCREEN_O5_7,
+  O4_7: SCREEN_O4_7,
   O5_6: SCREEN_O5_6,
   O4_6: SCREEN_O4_6,
   C_SHOP: SCREEN_CAVE_SHOP,
@@ -1385,4 +1429,4 @@ export const ALL_SCREENS: Record<string, ScreenData> = {
   C_SECRET_WHITE_SWORD: SCREEN_CAVE_SECRET_WHITE_SWORD,
   C_SECRET_FAIRY_SPRING: SCREEN_CAVE_SECRET_FAIRY_SPRING,
   D1_SECRET_CHAMBER: SCREEN_D1_SECRET_CHAMBER,
-};
+});

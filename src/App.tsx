@@ -20,6 +20,18 @@ import { saveGameProgress } from './game/saveSystem';
 import { ControlsConfig, loadControlsConfig, saveControlsConfig, formatKeyCode } from './game/controlsConfig';
 import { OverworldViewportGridOverlay } from './components/OverworldMinimap';
 import {
+  auditAllScreenEntryTriggers,
+  validateTriggerAgainstScreenBoundary,
+  computeTriggerWarpPoint,
+  TriggerDryRunResult,
+} from './game/entryTriggerDebug';
+import { ALL_SCREENS } from './game/worldData';
+import {
+  BOSS_TRIFORCE_BATTLES,
+  getTriforceByScreenId,
+  TOTAL_TRIFORCE_PIECES,
+} from './game/bossTriforceSystem';
+import {
   Volume2,
   VolumeX,
   Gamepad2,
@@ -34,6 +46,8 @@ import {
   CloudRain,
   CloudLightning,
   Grid,
+  ScanSearch,
+  Zap,
 } from 'lucide-react';
 
 export default function App() {
@@ -50,8 +64,25 @@ export default function App() {
   const [isMuted, setIsMuted] = useState<boolean>(false);
   const [fps, setFps] = useState<number>(60);
   const [saveMessage, setSaveMessage] = useState<string | null>(null);
-  const [showGridOverlay, setShowGridOverlay] = useState<boolean>(false);
+  const [showGridOverlay, setShowGridOverlay] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem('zelda_persistent_minimap_overlay_v1') === 'true';
+    } catch {
+      return false;
+    }
+  });
+  useEffect(() => {
+    try {
+      localStorage.setItem('zelda_persistent_minimap_overlay_v1', String(showGridOverlay));
+    } catch {
+      // Ignore storage failures
+    }
+  }, [showGridOverlay]);
   const [visitedScreens, setVisitedScreens] = useState<string[]>(['O7_7', '7,7']);
+  const [showEntryTriggerDebug, setShowEntryTriggerDebug] = useState<boolean>(false);
+  const [selectedTriggerId, setSelectedTriggerId] = useState<string | null>(null);
+  const [triggerValidationResult, setTriggerValidationResult] = useState<TriggerDryRunResult | null>(null);
+  const [warpFeedback, setWarpFeedback] = useState<{ ok: boolean; message: string } | null>(null);
 
   // Controls Configuration (Keyboard & Gamepad Remapping)
   const [controlsConfig, setControlsConfig] = useState<ControlsConfig>(() => loadControlsConfig());
@@ -62,6 +93,31 @@ export default function App() {
       engineRef.current.showHitboxDebug = controlsConfig.showHitboxDebug ?? false;
     }
   }, [controlsConfig]);
+
+  const currentScreenId = engineRef.current?.currentScreen.id;
+  useEffect(() => {
+    setTriggerValidationResult(null);
+    setSelectedTriggerId(null);
+    if (!showEntryTriggerDebug) {
+      setWarpFeedback(null);
+    }
+    if (engineRef.current) {
+      engineRef.current.debugTriggerValidation = null;
+      engineRef.current.showEntryTriggerDebug = showEntryTriggerDebug;
+      if (showEntryTriggerDebug) {
+        auditAllScreenEntryTriggers(ALL_SCREENS, {
+          logO47Dump: true,
+          playerBox: {
+            screenId: engineRef.current.currentScreen.id,
+            x: engineRef.current.player.x,
+            y: engineRef.current.player.y,
+            width: 14,
+            height: 14,
+          },
+        });
+      }
+    }
+  }, [showEntryTriggerDebug, currentScreenId]);
 
   // Toggle Hitbox Collision Debug Overlay
   const handleToggleHitboxDebug = useCallback(() => {
@@ -79,13 +135,29 @@ export default function App() {
     });
   }, []);
 
-  // Global F3 or Backquote (~) debug hotkey and G hotkey for 8x8 Grid Overlay
+  const handleToggleEntryTriggerDebug = useCallback(() => {
+    chiptune.playKey();
+    setShowEntryTriggerDebug((prev) => {
+      const next = !prev;
+      if (engineRef.current) {
+        engineRef.current.showEntryTriggerDebug = next;
+      }
+      return next;
+    });
+  }, []);
+
+  // Global F3/Backquote (Hitboxes), F4/T (Entry Triggers), and G/M (16x8 Mini-Map Overlay) hotkeys
   useEffect(() => {
     const handleGlobalKeyDown = (e: KeyboardEvent) => {
       if (e.code === 'F3' || e.code === 'Backquote') {
         e.preventDefault();
         handleToggleHitboxDebug();
-      } else if (e.code === 'KeyG') {
+      } else if (e.code === 'F4' || e.code === 'KeyT') {
+        if (gameState !== GameState.REGISTER_NAME) {
+          e.preventDefault();
+          handleToggleEntryTriggerDebug();
+        }
+      } else if (e.code === 'KeyG' || e.code === 'KeyM') {
         if (gameState !== GameState.REGISTER_NAME) {
           setShowGridOverlay((prev) => !prev);
         }
@@ -93,7 +165,7 @@ export default function App() {
     };
     window.addEventListener('keydown', handleGlobalKeyDown);
     return () => window.removeEventListener('keydown', handleGlobalKeyDown);
-  }, [handleToggleHitboxDebug, gameState]);
+  }, [handleToggleHitboxDebug, handleToggleEntryTriggerDebug, gameState]);
 
   // Gamepad hook
   const { controllerName, pollGamepad } = useGamepad();
@@ -106,6 +178,7 @@ export default function App() {
     if (engineRef.current) return engineRef.current;
     const engine = new GameEngine(canvas);
     engine.showHitboxDebug = controlsConfigRef.current.showHitboxDebug ?? false;
+    engine.showEntryTriggerDebug = showEntryTriggerDebug;
     engine.transitionMode = transitionMode;
     engineRef.current = engine;
 
@@ -347,7 +420,8 @@ export default function App() {
       engineRef.current.player,
       engineRef.current.currentScreen.id,
       undefined,
-      Array.from(engineRef.current.visitedScreens)
+      Array.from(engineRef.current.visitedScreens),
+      Array.from(engineRef.current.collectedHeartContainers)
     );
     setSaveMessage('PROGRESS SAVED TO BATTERY RAM!');
     setTimeout(() => setSaveMessage(null), 2500);
@@ -360,7 +434,7 @@ export default function App() {
     chiptune.stopDeathChime();
     chiptune.playKey();
     const p = engineRef.current.player;
-    p.hearts = 6; // 3 full hearts
+    p.hearts = Math.min(p.maxHearts, 6); // Classic NES continue refills 3 hearts while retaining upgraded maxHearts!
     p.knockback = { x: 0, y: 0, duration: 0 };
     p.invincibleTimer = 0;
     p.isAttacking = false;
@@ -498,7 +572,22 @@ export default function App() {
             <span className="hidden sm:inline">HITBOXES</span>
           </button>
 
-          {/* 8x8 Overworld Transparent Grid Overlay Toggle */}
+          {/* Temporary Entry Trigger Volume Debug Overlay Toggle */}
+          <button
+            id="entry-trigger-debug-btn"
+            onClick={handleToggleEntryTriggerDebug}
+            className={`p-1.5 rounded border transition-colors cursor-pointer flex items-center gap-1 text-[8px] ${
+              showEntryTriggerDebug
+                ? 'bg-[#002933] border-[#00e5ff] text-[#00e5ff] shadow-[0_0_8px_rgba(0,229,255,0.5)]'
+                : 'bg-[#15151a] border-gray-700 text-gray-400 hover:text-white'
+            }`}
+            title="Toggle Invisible Entry/Exit Trigger Volume Debugger (Press F4 or T)"
+          >
+            <ScanSearch size={12} className={showEntryTriggerDebug ? 'animate-pulse' : ''} />
+            <span className="hidden sm:inline">TRIGGERS</span>
+          </button>
+
+          {/* 16x8 Overworld Persistent Mini-Map Overlay Toggle */}
           <button
             onClick={() => {
               chiptune.playKey();
@@ -509,10 +598,10 @@ export default function App() {
                 ? 'bg-[#153528] border-[#58f898] text-[#58f898] shadow-[0_0_8px_rgba(88,248,152,0.4)]'
                 : 'bg-[#15151a] border-gray-700 text-gray-400 hover:text-white'
             }`}
-            title="Toggle Transparent 8x8 Overworld Grid Overlay (Press G)"
+            title="Toggle Persistent 16x8 Overworld Mini-Map Overlay (Press G or M)"
           >
             <Grid size={12} className={showGridOverlay ? 'animate-pulse' : ''} />
-            <span className="hidden sm:inline">8x8 GRID</span>
+            <span className="hidden sm:inline">16x8 MAP</span>
           </button>
 
           {/* Overworld Dynamic Weather Controller Toggle */}
@@ -619,7 +708,7 @@ export default function App() {
                 className="w-full h-full object-contain block image-rendering-pixelated"
               />
 
-              {/* Transparent 8x8 Overworld Grid Overlay on Viewport with Fog of War */}
+              {/* Persistent 16x8 Overworld Mini-Map Overlay on Viewport */}
               {showGridOverlay && engineRef.current && (
                 <OverworldViewportGridOverlay
                   currentScreen={engineRef.current.currentScreen}
@@ -679,6 +768,16 @@ export default function App() {
                     </button>
                     <button
                       onClick={() => {
+                        if (engineRef.current && activeSlot) {
+                          saveGameProgress(
+                            activeSlot.id,
+                            engineRef.current.player,
+                            engineRef.current.currentScreen.id,
+                            engineRef.current.activeSlot?.deaths ?? activeSlot.deaths,
+                            Array.from(engineRef.current.visitedScreens),
+                            Array.from(engineRef.current.collectedHeartContainers)
+                          );
+                        }
                         setGameState(GameState.FILE_SELECT);
                         chiptune.stopGameOverTheme();
                         chiptune.stopBgm();
@@ -694,28 +793,436 @@ export default function App() {
               )}
 
               {/* Victory Screen */}
-              {gameState === GameState.VICTORY && (
-                <div className="absolute inset-0 bg-black/95 z-40 flex flex-col items-center justify-center p-6 text-center">
-                  <div className="text-4xl text-[#f8b800] mb-2 animate-bounce">▲</div>
-                  <h2 className="text-[#f8b800] text-xs sm:text-sm mb-3 tracking-widest uppercase font-bold">
-                    TRIFORCE OF WISDOM OBTAINED!
-                  </h2>
-                  <p className="text-[8px] text-gray-300 leading-relaxed max-w-sm mb-6">
-                    YOU RECOVERED THE TRIFORCE PIECE FROM LEVEL {engineRef.current?.currentScreen.levelNumber}!
-                  </p>
+              {gameState === GameState.VICTORY && (() => {
+                const screenId = engineRef.current?.currentScreen.id ?? '';
+                const currentTriforce = getTriforceByScreenId(screenId);
+                const collectedIds = new Set(playerState?.collectedTriforceIds ?? []);
+                const totalPieces = Math.max(
+                  playerState?.inventory.triforcePieces ?? 0,
+                  collectedIds.size
+                );
+                const allCollected = totalPieces >= TOTAL_TRIFORCE_PIECES;
+
+                return (
+                  <div className="absolute inset-0 bg-black/95 z-40 flex flex-col items-center justify-center p-5 text-center">
+                    <div className="flex items-center gap-3 mb-2">
+                      {BOSS_TRIFORCE_BATTLES.map((b) => {
+                        const owned = collectedIds.has(b.triforceId);
+                        return (
+                          <div
+                            key={b.triforceId}
+                            className={`flex flex-col items-center px-2 py-1 border ${
+                              owned
+                                ? 'border-[#f8b800] bg-[#2a2000] text-[#f8b800]'
+                                : 'border-gray-700 bg-[#101010] text-gray-600'
+                            }`}
+                          >
+                            <span className={`text-2xl leading-none ${owned ? 'animate-pulse' : ''}`}>
+                              ▲
+                            </span>
+                            <span className="text-[6px] mt-1">LVL {b.level}</span>
+                          </div>
+                        );
+                      })}
+                    </div>
+
+                    <h2 className="text-[#f8b800] text-xs sm:text-sm mb-2 tracking-widest uppercase font-bold">
+                      {allCollected
+                        ? 'TRIFORCE OF WISDOM COMPLETE!'
+                        : `${currentTriforce?.triforceName.toUpperCase() ?? 'TRIFORCE PIECE'} OBTAINED!`}
+                    </h2>
+                    <p className="text-[8px] text-gray-300 leading-relaxed max-w-sm mb-4">
+                      {allCollected
+                        ? `ALL ${TOTAL_TRIFORCE_PIECES} TRIFORCE PIECES RECOVERED! YOU VANQUISHED EVERY LABYRINTH GUARDIAN!`
+                        : `YOU RECOVERED LEVEL ${currentTriforce?.level ?? engineRef.current?.currentScreen.levelNumber ?? 1}'S TRIFORCE PIECE (${totalPieces}/${TOTAL_TRIFORCE_PIECES}).`}
+                    </p>
+
+                    <div className="flex flex-wrap items-center justify-center gap-2.5">
+                      <button
+                        id="continue-after-triforce-btn"
+                        onClick={() => {
+                          chiptune.playKey();
+                          engineRef.current?.continueFromVictory();
+                        }}
+                        className="px-4 py-2 bg-[#007828] hover:bg-[#58f898] text-white hover:text-black text-[9px] border-2 border-white cursor-pointer"
+                      >
+                        CONTINUE QUEST
+                      </button>
+                      <button
+                        onClick={() => {
+                          setGameState(GameState.FILE_SELECT);
+                          chiptune.stopBgm();
+                        }}
+                        className="px-4 py-2 bg-[#008088] hover:bg-[#00e8d8] text-white hover:text-black text-[9px] border-2 border-white cursor-pointer"
+                      >
+                        FILE SELECT
+                      </button>
+                    </div>
+                  </div>
+                );
+              })()}
+            </div>
+          </div>
+
+        {/* Temporary Entry Trigger Diagnostics Panel */}
+        {showEntryTriggerDebug && engineRef.current && gameState !== GameState.TITLE && gameState !== GameState.FILE_SELECT && (() => {
+          const engine = engineRef.current;
+          const allTriggers = engine.getEntryTriggerVolumes();
+          const activeTriggers = allTriggers.filter((t) => t.isRevealed);
+          const hiddenCount = allTriggers.length - activeTriggers.length;
+          const allAudits = auditAllScreenEntryTriggers(ALL_SCREENS, { logO47Dump: false });
+          const brokenScreens = allAudits.filter((a) => !a.isValid);
+          const o47Audit = allAudits.find((a) => a.screenId === 'O4_7');
+          const o57ToO47 = allAudits
+            .find((a) => a.screenId === 'O5_7')
+            ?.triggers.find((t) => t.targetScreenId === 'O4_7');
+          const livePlayer = engine.player;
+
+          const effectiveSelectedTrigger =
+            activeTriggers.find((t) => t.id === selectedTriggerId) ?? activeTriggers[0] ?? null;
+
+          const warpPreview = effectiveSelectedTrigger
+            ? computeTriggerWarpPoint(effectiveSelectedTrigger, engine.currentScreen)
+            : null;
+
+          const activeValidation =
+            triggerValidationResult &&
+            effectiveSelectedTrigger &&
+            triggerValidationResult.screenId === engine.currentScreen.id &&
+            triggerValidationResult.triggerId === effectiveSelectedTrigger.id
+              ? triggerValidationResult
+              : null;
+
+          const handleValidateSelectedTrigger = () => {
+            if (!effectiveSelectedTrigger) return;
+            chiptune.playKey();
+            const result = validateTriggerAgainstScreenBoundary(
+              effectiveSelectedTrigger,
+              engine.currentScreen
+            );
+            setSelectedTriggerId(effectiveSelectedTrigger.id);
+            setTriggerValidationResult(result);
+            engine.debugTriggerValidation = result;
+          };
+
+          const handleWarpToSelectedTrigger = () => {
+            if (!effectiveSelectedTrigger) return;
+            const res = engine.warpToTriggerVolume(effectiveSelectedTrigger.id);
+            setWarpFeedback({ ok: res.ok, message: res.message });
+            if (res.ok && !res.transitionStarted) {
+              chiptune.playKey();
+            }
+          };
+
+          return (
+            <div
+              id="entry-trigger-inspector"
+              className="w-full max-w-[560px] mt-2 bg-[#07131a] border border-[#00e5ff]/60 rounded px-3 py-2 text-[8px] text-[#d6f9ff] shadow-lg"
+            >
+              <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[#00e5ff]/25 pb-1.5 mb-1.5">
+                <span className="text-[#00e5ff] font-bold">
+                  ENTRY TRIGGER DEBUGGER • {engine.currentScreen.id} ({engine.currentScreen.name})
+                </span>
+                <span className={brokenScreens.length === 0 ? 'text-[#58f898]' : 'text-[#ff1744]'}>
+                  {brokenScreens.length === 0
+                    ? `ALL ${allAudits.length} SCREENS VALID`
+                    : `${brokenScreens.length} BROKEN TRIGGER(S)`}
+                </span>
+              </div>
+
+              <div className="flex flex-wrap items-center justify-between gap-2 mb-1.5 text-[7px]">
+                <span className={o47Audit?.isValid && o57ToO47?.isReachable ? 'text-[#58f898]' : 'text-[#ff1744]'}>
+                  COORD 4,7 (O4_7):{' '}
+                  {o47Audit?.isValid && o57ToO47?.isReachable
+                    ? `MAPPED & REACHABLE (O5_7 L→O4_7 @ x<=4, y=${o57ToO47.walkableRects[0]?.y}..${
+                        (o57ToO47.walkableRects[0]?.y ?? 0) +
+                        o57ToO47.walkableRects.reduce((acc, r) => acc + r.height, 0)
+                      })`
+                    : 'INVALID / UNREACHABLE'}
+                </span>
+                <span
+                  id="entry-trigger-player-hitbox"
+                  className="text-[#ffeb3b] font-mono tabular-nums"
+                >
+                  LINK: X={Math.round(livePlayer.x)} Y={Math.round(livePlayer.y)} W=14 H=14
+                </span>
+              </div>
+
+              <div className="max-h-32 overflow-y-auto border border-[#00e5ff]/25 rounded bg-[#040c11]">
+                <table
+                  id="entry-trigger-table"
+                  data-testid="entry-trigger-table"
+                  className="w-full border-collapse text-left font-mono text-[9px] sm:text-[10px]"
+                >
+                  <thead className="sticky top-0 bg-[#0a1d26] text-[#00e5ff] border-b border-[#00e5ff]/30 text-[7px] font-['Press_Start_2P',monospace]">
+                    <tr>
+                      <th className="py-1 px-1.5 w-8 text-center">DIR</th>
+                      <th className="py-1 px-1.5">TRIGGER</th>
+                      <th className="py-1 px-1.5 text-right">X</th>
+                      <th className="py-1 px-1.5 text-right">Y</th>
+                      <th className="py-1 px-1.5 text-right">W</th>
+                      <th className="py-1 px-1.5 text-right">H</th>
+                      <th className="py-1 px-1.5">RULE</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-[#00e5ff]/15">
+                    {activeTriggers.length === 0 ? (
+                      <tr>
+                        <td colSpan={7} className="py-2 px-2 text-center text-gray-400 text-[8px]">
+                          No active trigger volumes on this screen.
+                        </td>
+                      </tr>
+                    ) : (
+                      activeTriggers.map((t) => {
+                        const ok =
+                          t.kind !== 'unmapped_open_edge' &&
+                          t.targetExists &&
+                          (t.kind !== 'edge_exit' || t.isReachable);
+                        const isRowSelected = effectiveSelectedTrigger?.id === t.id;
+                        const expectedSet = new Set(t.expectedDirections);
+                        const activeArrowClass = !ok
+                          ? 'text-[#ff6b8b] font-bold drop-shadow-[0_0_2px_rgba(255,107,139,0.9)]'
+                          : 'text-[#58f898] font-bold drop-shadow-[0_0_2px_rgba(88,248,152,0.9)]';
+                        const inactiveArrowClass = 'text-gray-700/60';
+                        const dirSummary = t.expectedDirections.map((d) => d.toUpperCase()).join('/');
+
+                        return (
+                          <tr
+                            key={t.id}
+                            data-trigger-id={t.id}
+                            data-selected={isRowSelected ? 'true' : 'false'}
+                            onClick={() => {
+                              chiptune.playKey();
+                              setSelectedTriggerId(t.id);
+                              setTriggerValidationResult(null);
+                              engine.debugTriggerValidation = null;
+                            }}
+                            className={`cursor-pointer transition-colors ${
+                              !ok
+                                ? isRowSelected
+                                  ? 'bg-[#3d0016] text-[#ff6b8b] ring-1 ring-inset ring-[#ff6b8b]'
+                                  : 'bg-[#2a000d]/80 text-[#ff6b8b]'
+                                : isRowSelected
+                                ? 'bg-[#0f2d3d] text-white ring-1 ring-inset ring-[#00e5ff]'
+                                : 'hover:bg-[#0b202b] text-[#d6f9ff]'
+                            }`}
+                          >
+                            <td className="py-1 px-1.5">
+                              {/* Small 4-way Visual Orientation Indicator (Up, Down, Left, Right) */}
+                              <div
+                                className="grid grid-cols-3 grid-rows-3 place-items-center w-6 h-6 mx-auto rounded-sm border border-[#00e5ff]/25 bg-[#040b10] leading-none text-[6px]"
+                                data-testid={`trigger-orientation-${t.id}`}
+                                data-expected-directions={t.expectedDirections.join(',')}
+                                title={`Expected player movement: ${dirSummary}`}
+                                aria-label={`Expected movement orientation: ${dirSummary}`}
+                              >
+                                <span className="col-start-1 row-start-1" />
+                                <span
+                                  data-dir="up"
+                                  data-active={expectedSet.has('up') ? 'true' : 'false'}
+                                  className={`col-start-2 row-start-1 ${
+                                    expectedSet.has('up') ? activeArrowClass : inactiveArrowClass
+                                  }`}
+                                >
+                                  ▲
+                                </span>
+                                <span className="col-start-3 row-start-1" />
+                                <span
+                                  data-dir="left"
+                                  data-active={expectedSet.has('left') ? 'true' : 'false'}
+                                  className={`col-start-1 row-start-2 ${
+                                    expectedSet.has('left') ? activeArrowClass : inactiveArrowClass
+                                  }`}
+                                >
+                                  ◄
+                                </span>
+                                <span className="col-start-2 row-start-2 text-[4px] text-[#00e5ff]/50">
+                                  ■
+                                </span>
+                                <span
+                                  data-dir="right"
+                                  data-active={expectedSet.has('right') ? 'true' : 'false'}
+                                  className={`col-start-3 row-start-2 ${
+                                    expectedSet.has('right') ? activeArrowClass : inactiveArrowClass
+                                  }`}
+                                >
+                                  ►
+                                </span>
+                                <span className="col-start-1 row-start-3" />
+                                <span
+                                  data-dir="down"
+                                  data-active={expectedSet.has('down') ? 'true' : 'false'}
+                                  className={`col-start-2 row-start-3 ${
+                                    expectedSet.has('down') ? activeArrowClass : inactiveArrowClass
+                                  }`}
+                                >
+                                  ▼
+                                </span>
+                                <span className="col-start-3 row-start-3" />
+                              </div>
+                            </td>
+                            <td className="py-1 px-1.5 font-bold whitespace-nowrap">
+                              {isRowSelected && <span className="text-[#00e5ff] mr-1">▸</span>}
+                              {t.label}
+                            </td>
+                            <td
+                              data-col="x"
+                              className="py-1 px-1.5 text-right tabular-nums text-[#9cf4ff]"
+                            >
+                              {t.thresholdRect.x}
+                            </td>
+                            <td
+                              data-col="y"
+                              className="py-1 px-1.5 text-right tabular-nums text-[#9cf4ff]"
+                            >
+                              {t.thresholdRect.y}
+                            </td>
+                            <td
+                              data-col="w"
+                              className="py-1 px-1.5 text-right tabular-nums text-[#58f898]"
+                            >
+                              {t.thresholdRect.width}
+                            </td>
+                            <td
+                              data-col="h"
+                              className="py-1 px-1.5 text-right tabular-nums text-[#58f898]"
+                            >
+                              {t.thresholdRect.height}
+                            </td>
+                            <td className="py-1 px-1.5 text-gray-300 whitespace-nowrap">
+                              {t.ruleNote}
+                            </td>
+                          </tr>
+                        );
+                      })
+                    )}
+                  </tbody>
+                </table>
+              </div>
+
+              {/* Validation & Warp Action Bar */}
+              <div className="mt-1.5 flex flex-wrap items-center justify-between gap-2">
+                <div className="text-[6.5px] text-gray-400">
+                  {effectiveSelectedTrigger
+                    ? `SELECTED: ${effectiveSelectedTrigger.label}`
+                    : 'NO ACTIVE TRIGGER SELECTED'}
+                  {hiddenCount > 0 && (
+                    <span className="ml-2 text-[#f8b800]/80">
+                      (+{hiddenCount} hidden until active)
+                    </span>
+                  )}
+                </div>
+
+                <div className="flex flex-wrap items-center gap-1.5">
                   <button
-                    onClick={() => {
-                      setGameState(GameState.FILE_SELECT);
-                      chiptune.stopBgm();
-                    }}
-                    className="px-4 py-2 bg-[#008088] hover:bg-[#00e8d8] text-white hover:text-black text-[9px] border-2 border-white cursor-pointer"
+                    id="warp-to-trigger-btn"
+                    data-testid="warp-to-trigger-btn"
+                    disabled={!effectiveSelectedTrigger || !warpPreview?.canTeleport}
+                    title={
+                      warpPreview?.canTeleport
+                        ? `Teleport Link to (${warpPreview.x}, ${warpPreview.y}) inside ${effectiveSelectedTrigger?.label}`
+                        : warpPreview?.reason ?? 'Select an active trigger volume'
+                    }
+                    onClick={handleWarpToSelectedTrigger}
+                    className={`px-2 py-1 rounded border text-[7px] font-bold transition-colors flex items-center gap-1 ${
+                      effectiveSelectedTrigger && warpPreview?.canTeleport
+                        ? 'bg-[#082e1e] border-[#58f898] text-[#58f898] hover:bg-[#58f898] hover:text-black cursor-pointer'
+                        : 'bg-[#101820] border-gray-700 text-gray-600 cursor-not-allowed'
+                    }`}
                   >
-                    RETURN TO FILE SELECT
+                    <Zap size={10} />
+                    WARP TO SCREEN
                   </button>
+
+                  <button
+                    id="validate-trigger-btn"
+                    data-testid="validate-trigger-btn"
+                    disabled={!effectiveSelectedTrigger}
+                    onClick={handleValidateSelectedTrigger}
+                    className={`px-2 py-1 rounded border text-[7px] font-bold transition-colors ${
+                      effectiveSelectedTrigger
+                        ? 'bg-[#082c38] border-[#00e5ff] text-[#00e5ff] hover:bg-[#00e5ff] hover:text-black cursor-pointer'
+                        : 'bg-[#101820] border-gray-700 text-gray-600 cursor-not-allowed'
+                    }`}
+                  >
+                    DRY-RUN VALIDATE BOUNDS
+                  </button>
+                </div>
+              </div>
+
+              {warpFeedback && (
+                <div
+                  id="entry-trigger-warp-status"
+                  data-testid="entry-trigger-warp-status"
+                  className={`mt-1 px-2 py-1 rounded border text-[6.5px] font-mono ${
+                    warpFeedback.ok
+                      ? 'bg-[#052414] border-[#58f898]/60 text-[#9effc7]'
+                      : 'bg-[#2a000d] border-[#ff1744]/60 text-[#ff8aa1]'
+                  }`}
+                >
+                  {warpFeedback.message}
+                </div>
+              )}
+
+              {activeValidation && (
+                <div
+                  id="entry-trigger-validation-result"
+                  data-testid="entry-trigger-validation-result"
+                  data-validation-status={activeValidation.status}
+                  className={`mt-1.5 p-2 rounded border text-[7px] ${
+                    activeValidation.status === 'FAIL'
+                      ? 'bg-[#2a000d] border-[#ff1744] text-[#ff8aa1]'
+                      : activeValidation.status === 'WARN'
+                      ? 'bg-[#241a00] border-[#f8b800] text-[#ffe082]'
+                      : 'bg-[#052414] border-[#58f898] text-[#9effc7]'
+                  }`}
+                >
+                  <div className="flex flex-wrap items-center justify-between gap-2 font-bold mb-1">
+                    <span>
+                      [{activeValidation.status}] {activeValidation.triggerLabel}
+                    </span>
+                    <span>{activeValidation.summary}</span>
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-1 font-mono text-[9px]">
+                    {activeValidation.checks.map((chk) => (
+                      <div key={chk.name} className="flex items-start gap-1">
+                        <span className={chk.passed ? 'text-[#58f898]' : 'text-[#f8b800]'}>
+                          {chk.passed ? '✓' : '⚠'}
+                        </span>
+                        <span>
+                          <strong>{chk.name}:</strong> {chk.detail}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+
+                  {(activeValidation.deadZoneRects.length > 0 ||
+                    activeValidation.solidOverlapRects.length > 0) && (
+                    <div className="mt-1 pt-1 border-t border-white/15 font-mono text-[8.5px] flex flex-wrap gap-2">
+                      {activeValidation.deadZoneRects.length > 0 && (
+                        <span className="text-[#ff6b8b]">
+                          DEAD-ZONES:{' '}
+                          {activeValidation.deadZoneRects
+                            .map((r) => `[${r.x},${r.y} ${r.width}x${r.height}]`)
+                            .join(' ')}
+                        </span>
+                      )}
+                      {activeValidation.solidOverlapRects.length > 0 && (
+                        <span className="text-[#f8b800]">
+                          WALL OVERLAPS:{' '}
+                          {activeValidation.solidOverlapRects
+                            .map((r) => `[${r.x},${r.y} ${r.width}x${r.height}]`)
+                            .join(' ')}
+                        </span>
+                      )}
+                    </div>
+                  )}
                 </div>
               )}
             </div>
-          </div>
+          );
+        })()}
       </main>
 
       {/* Bottom Virtual Touch Controls (Shown if on touch device or toggled) */}

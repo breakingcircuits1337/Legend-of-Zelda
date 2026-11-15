@@ -27,7 +27,8 @@ const NesHeartSprite: React.FC<{
   isPulsing?: boolean;
   isHurt?: boolean;
   isHealed?: boolean;
-}> = ({ fillType, isGhostLost, isPulsing, isHurt, isHealed }) => {
+  compact?: boolean;
+}> = ({ fillType, isGhostLost, isPulsing, isHurt, isHealed, compact }) => {
   // Classic NES 2A03 Zelda Color Palette
   const outlineColor = '#000000';
   const heartRed = '#d82800';
@@ -36,7 +37,7 @@ const NesHeartSprite: React.FC<{
   const ghostAmber = '#f8b800';
 
   return (
-    <div className="relative w-3.5 h-3.5 flex items-center justify-center">
+    <div className={`relative ${compact ? 'w-2.5 h-2.5' : 'w-3.5 h-3.5'} flex items-center justify-center`}>
       <svg
         viewBox="0 0 8 7"
         className="w-full h-full block"
@@ -211,7 +212,8 @@ export const AnimatedHearts: React.FC<AnimatedHeartsProps> = ({
     return () => clearTimeout(clearTimer);
   }, [displayedHearts, displayedMaxHearts]);
 
-  const totalContainers = Math.max(3, Math.floor(displayedMaxHearts / 2));
+  const totalContainers = Math.min(16, Math.max(3, Math.floor(displayedMaxHearts / 2)));
+  const useTwoRowEightCol = totalContainers > 8;
   const isCriticalHealth = displayedHearts > 0 && displayedHearts <= 2;
 
   return (
@@ -227,8 +229,15 @@ export const AnimatedHearts: React.FC<AnimatedHeartsProps> = ({
         </span>
       </div>
 
-      {/* Heart Containers Grid (4 columns, matches authentic NES Zelda layout) */}
-      <div className="grid grid-cols-4 gap-1 sm:gap-1.5">
+      {/* Heart Containers Grid (scales smoothly up to classic 8x2 = 16 NES containers) */}
+      <div
+        id="hud-heart-containers-grid"
+        className={
+          useTwoRowEightCol
+            ? 'grid grid-cols-8 gap-0.5'
+            : 'grid grid-cols-4 gap-1 sm:gap-1.5'
+        }
+      >
         {Array.from({ length: totalContainers }).map((_, index) => {
           // Calculate heart value for this container
           const dispValue = displayedHearts - index * 2;
@@ -307,6 +316,7 @@ export const AnimatedHearts: React.FC<AnimatedHeartsProps> = ({
                 isPulsing={isPulsing}
                 isHurt={isHurt}
                 isHealed={isHealed}
+                compact={useTwoRowEightCol}
               />
             </motion.div>
           );

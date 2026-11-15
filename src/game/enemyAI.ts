@@ -19,6 +19,7 @@ export * from './peahatEnemy';
 export * from './wizzrobeEnemy';
 export * from './ghiniEnemy';
 export * from './likeLikeEnemy';
+export * from './stateAIController';
 
 export type TileCollisionFn = (x: number, y: number, w: number, h: number) => boolean;
 

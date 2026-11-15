@@ -4,6 +4,7 @@
  */
 
 import { SaveSlotData, ItemType, PlayerState } from '../types';
+import { normalizeTriforceIds } from './bossTriforceSystem';
 
 const STORAGE_KEY = 'zelda_nes_battery_ram_v1';
 
@@ -29,6 +30,11 @@ export function getDefaultSaveSlots(): SaveSlotData[] {
       deaths: 0,
       currentScreen: 'O7_7',
       visitedScreens: ['O7_7'],
+      collectedHeartContainers: [],
+      collectedTriforceIds: [],
+      defeatedBossRooms: [],
+      unlockedBestiary: [],
+      bestiaryDefeatCounts: {},
       timestamp: Date.now(),
     },
     {
@@ -49,6 +55,11 @@ export function getDefaultSaveSlots(): SaveSlotData[] {
       deaths: 0,
       currentScreen: 'O7_7',
       visitedScreens: ['O7_7'],
+      collectedHeartContainers: [],
+      collectedTriforceIds: [],
+      defeatedBossRooms: [],
+      unlockedBestiary: [],
+      bestiaryDefeatCounts: {},
       timestamp: 0,
     },
     {
@@ -69,6 +80,11 @@ export function getDefaultSaveSlots(): SaveSlotData[] {
       deaths: 0,
       currentScreen: 'O7_7',
       visitedScreens: ['O7_7'],
+      collectedHeartContainers: [],
+      collectedTriforceIds: [],
+      defeatedBossRooms: [],
+      unlockedBestiary: [],
+      bestiaryDefeatCounts: {},
       timestamp: 0,
     },
   ];
@@ -80,7 +96,24 @@ export function loadAllSaveSlots(): SaveSlotData[] {
     if (!raw) return getDefaultSaveSlots();
     const parsed = JSON.parse(raw);
     if (Array.isArray(parsed) && parsed.length === 3) {
-      return parsed;
+      return parsed.map((slot) => {
+        const normalizedTriforceIds = normalizeTriforceIds(
+          slot?.collectedTriforceIds,
+          Number(slot?.triforcePieces) || 0
+        );
+        return {
+          ...slot,
+          deaths: Math.max(0, Number(slot?.deaths) || 0),
+          collectedTriforceIds: normalizedTriforceIds,
+          triforcePieces: Math.max(
+            Number(slot?.triforcePieces) || 0,
+            normalizedTriforceIds.length
+          ),
+          defeatedBossRooms: Array.isArray(slot?.defeatedBossRooms)
+            ? slot.defeatedBossRooms
+            : [],
+        };
+      });
     }
     return getDefaultSaveSlots();
   } catch {
@@ -108,10 +141,22 @@ export function saveGameProgress(
   player: PlayerState,
   currentScreenId: string,
   deathsCount?: number,
-  visitedScreens?: string[]
+  visitedScreens?: string[],
+  collectedHeartContainers?: string[]
 ) {
   const slots = loadAllSaveSlots();
   const current = slots.find((s) => s.id === slotId) || slots[0];
+
+  const resolvedContainers =
+    collectedHeartContainers ??
+    player.collectedHeartContainers ??
+    current.collectedHeartContainers ??
+    [];
+
+  const normalizedTriforceIds = normalizeTriforceIds(
+    player.collectedTriforceIds ?? current.collectedTriforceIds,
+    player.inventory.triforcePieces
+  );
 
   const updated: SaveSlotData = {
     ...current,
@@ -139,10 +184,25 @@ export function saveGameProgress(
     hasMagicalShield: Boolean(player.hasMagicalShield || player.inventory.hasMagicalShield),
     hasCompass: player.inventory.hasCompass,
     hasDungeonMap: player.inventory.hasDungeonMap,
-    triforcePieces: player.inventory.triforcePieces,
-    deaths: deathsCount !== undefined ? deathsCount : current.deaths,
+    triforcePieces: Math.max(player.inventory.triforcePieces, normalizedTriforceIds.length),
+    deaths:
+      deathsCount !== undefined
+        ? Math.max(0, deathsCount)
+        : Math.max(0, player.deaths ?? current.deaths ?? 0),
     currentScreen: currentScreenId,
     visitedScreens: visitedScreens && visitedScreens.length > 0 ? visitedScreens : current.visitedScreens || ['O7_7'],
+    collectedHeartContainers: Array.from(new Set(resolvedContainers)),
+    collectedTriforceIds: normalizedTriforceIds,
+    defeatedBossRooms: Array.from(
+      new Set(player.defeatedBossRooms ?? current.defeatedBossRooms ?? [])
+    ),
+    unlockedBestiary: Array.from(
+      new Set(player.unlockedBestiary ?? current.unlockedBestiary ?? [])
+    ),
+    bestiaryDefeatCounts: {
+      ...(current.bestiaryDefeatCounts || {}),
+      ...(player.bestiaryDefeatCounts || {}),
+    },
     timestamp: Date.now(),
   };
 
@@ -174,6 +234,11 @@ export function clearSaveSlot(slotId: number) {
       deaths: 0,
       currentScreen: 'O7_7',
       visitedScreens: ['O7_7'],
+      collectedHeartContainers: [],
+      collectedTriforceIds: [],
+      defeatedBossRooms: [],
+      unlockedBestiary: [],
+      bestiaryDefeatCounts: {},
       timestamp: 0,
     };
     localStorage.setItem(STORAGE_KEY, JSON.stringify(slots));

@@ -39,6 +39,13 @@ import { WeatherController } from './weather';
 import { OldManNPC } from './oldMan';
 import { getPlayerOverworldLocation } from '../components/OverworldMinimap';
 import {
+  getScreenEntryTriggerVolumes,
+  computeTriggerWarpPoint,
+  EntryTriggerVolume,
+  TriggerDryRunResult,
+  TriggerOrientationDir,
+} from './entryTriggerDebug';
+import {
   isComplexEnemy,
   initEnemyBehavior,
   updateComplexEnemyAI,
@@ -70,6 +77,39 @@ import {
   recordSecretDiscoveryInVisitedMap,
   getSecretTilePositions,
 } from './secretWallDetector';
+import {
+  ABSOLUTE_MAX_HEARTS,
+  BASE_MAX_HEARTS,
+  applyHeartContainerUpgrade,
+  getBossHeartContainerId,
+  getCaveHeartContainerId,
+  getSpawnableHeartContainersForScreen,
+} from './heartContainerSystem';
+import {
+  canFireSwordBeam,
+  createSwordBeamProjectile,
+  isPlayerAtFullHealth,
+  isProjectileSolidTile,
+} from './swordBeam';
+import {
+  applyGuardedNudge,
+  canOccupyScreenBounds,
+  canStepToTilePosition,
+  checkGridTileCollision,
+  findNearestWalkablePosition,
+  PLAYER_HITBOX_SIZE,
+  stepKnockbackSafe,
+} from './playerCollision';
+import { unlockBestiaryEntry } from './bestiary';
+import {
+  applyBossGateState,
+  applyTriforcePieceCollection,
+  getBossBattleByEnemyType,
+  getBossBattleByScreenId,
+  getTriforceByScreenId,
+  normalizeTriforceIds,
+  TOTAL_TRIFORCE_PIECES,
+} from './bossTriforceSystem';
 
 export const SCREEN_WIDTH = 256;
 export const SCREEN_HEIGHT = 176;
@@ -126,6 +166,10 @@ export class GameEngine {
 
   // Debug overlay toggle: highlights collision bounding rectangles of player and enemies
   public showHitboxDebug: boolean = false;
+
+  // Temporary visual debug overlay: highlights invisible entry/exit/secret trigger volumes on screen
+  public showEntryTriggerDebug: boolean = false;
+  public debugTriggerValidation: TriggerDryRunResult | null = null;
 
   // Particle & Combat FX System
   public particles: ParticleSystem = new ParticleSystem();
@@ -198,6 +242,7 @@ export class GameEngine {
     type: ItemType;
     amount: number;
     permanent: boolean;
+    customData?: Record<string, any>;
   }> = [];
   public killCount: number = 0;
   public clockFreezeTimer: number = 0; // When clock item picked up
@@ -205,6 +250,11 @@ export class GameEngine {
 
   // Secrets & Discovery
   public revealedSecrets: Set<string> = new Set<string>();
+  public collectedHeartContainers: Set<string> = new Set<string>();
+  public collectedTriforceIds: Set<string> = new Set<string>();
+  public defeatedBossRooms: Set<string> = new Set<string>();
+  private heartUpgradeBannerTimer: number = 0;
+  private heartUpgradeBannerText: string = '';
   private pushTimer: number = 0;
   public candleUsedThisScreen: boolean = false;
   public foodBait: { x: number; y: number; timer: number } | null = null;
@@ -287,6 +337,12 @@ export class GameEngine {
       isHoldingItem: false,
       heldItemType: null,
       heldItemTimer: 0,
+      collectedHeartContainers: [],
+      collectedTriforceIds: [],
+      defeatedBossRooms: [],
+      unlockedBestiary: [],
+      bestiaryDefeatCounts: {},
+      deaths: 0,
     };
   }
 
@@ -295,19 +351,37 @@ export class GameEngine {
     this.activeSlot = slot;
     const savedMagicalShield = Boolean(slot.hasMagicalShield);
     const savedShield = slot.hasShield !== false || savedMagicalShield;
+    const clampedMaxHearts = Math.min(
+      ABSOLUTE_MAX_HEARTS,
+      Math.max(BASE_MAX_HEARTS, slot.maxHearts || BASE_MAX_HEARTS)
+    );
+    this.collectedHeartContainers = new Set(slot.collectedHeartContainers || []);
+    const restoredTriforceIds = normalizeTriforceIds(
+      slot.collectedTriforceIds,
+      slot.triforcePieces
+    );
+    this.collectedTriforceIds = new Set(restoredTriforceIds);
+    this.defeatedBossRooms = new Set(slot.defeatedBossRooms || []);
+
     this.player = {
       ...this.createDefaultPlayer(),
-      hearts: slot.hearts > 0 ? slot.hearts : Math.min(6, slot.maxHearts),
+      hearts: slot.hearts > 0 ? Math.min(clampedMaxHearts, slot.hearts) : Math.min(BASE_MAX_HEARTS, clampedMaxHearts),
       ringTier: slot.ringTier ?? 0,
       hasBlueRing: Boolean(slot.hasBlueRing),
       hasRedRing: Boolean(slot.hasRedRing),
       hasSteppingLadder: Boolean(slot.hasSteppingLadder),
-      maxHearts: slot.maxHearts,
+      maxHearts: clampedMaxHearts,
       swordTier: slot.swordTier,
       hasShield: savedShield,
       shieldTier: savedMagicalShield ? 2 : savedShield ? 1 : 0,
       hasMagicalShield: savedMagicalShield,
       bItem: slot.hasBoomerang ? ItemType.BOOMERANG : slot.bombs > 0 ? ItemType.BOMB : ItemType.NONE,
+      collectedHeartContainers: Array.from(this.collectedHeartContainers),
+      collectedTriforceIds: Array.from(this.collectedTriforceIds),
+      defeatedBossRooms: Array.from(this.defeatedBossRooms),
+      unlockedBestiary: Array.from(new Set(slot.unlockedBestiary || [])),
+      bestiaryDefeatCounts: { ...(slot.bestiaryDefeatCounts || {}) },
+      deaths: Math.max(0, Number(slot.deaths) || 0),
       inventory: {
         hasMagicalBoomerang: Boolean(slot.hasMagicalBoomerang),
         hasRedCandle: Boolean(slot.hasRedCandle),
@@ -328,7 +402,7 @@ export class GameEngine {
         rupees: slot.rupees,
         bombs: slot.bombs,
         keys: slot.keys,
-        triforcePieces: slot.triforcePieces,
+        triforcePieces: Math.max(slot.triforcePieces || 0, this.collectedTriforceIds.size),
       },
     };
 
@@ -347,6 +421,18 @@ export class GameEngine {
     } else {
       this.visitedScreens = new Set(['O7_7', '7,7', slot.currentScreen]);
     }
+
+    // Backfill legacy secret flags into collectedHeartContainers
+    if (this.revealedSecrets.has('claimed_cave_secret_heart')) {
+      this.collectedHeartContainers.add('hc_cave_secret_heart');
+    }
+    if (this.revealedSecrets.has('claimed_fairy_heart')) {
+      this.collectedHeartContainers.add('hc_cave_fairy_spring');
+    }
+    if (this.revealedSecrets.has('claimed_d2_shrine_heart')) {
+      this.collectedHeartContainers.add('hc_d2_shrine');
+    }
+    this.player.collectedHeartContainers = Array.from(this.collectedHeartContainers);
 
     this.loadScreen(startScreen.id, 120, 112);
     this.gameState = GameState.PLAYING;
@@ -480,6 +566,7 @@ export class GameEngine {
     this.pendingLootDrops = [];
     this.particles.clear();
     this.pushTimer = 0;
+    this.debugTriggerValidation = null;
     chiptune.stopDeathChime();
     this.playerDeathState = {
       active: false,
@@ -508,15 +595,28 @@ export class GameEngine {
 
     // Initialize Old Man NPC if entering a cave screen
     if (targetScreen.type === 'cave') {
+      const caveHcId = getCaveHeartContainerId(targetScreen.id);
       const isClaimed =
         this.revealedSecrets.has(`claimed_cave_item_${targetScreen.id}`) ||
         (targetScreen.caveItem === ItemType.SWORD_WOOD &&
           (this.player.swordTier > 0 || this.player.inventory.hasSword)) ||
         (targetScreen.caveItem === ItemType.SWORD_WHITE && this.player.swordTier >= 2) ||
+        (caveHcId !== null && this.collectedHeartContainers.has(caveHcId)) ||
         (targetScreen.id === 'C_SECRET_FAIRY_SPRING' &&
           this.revealedSecrets.has('claimed_fairy_heart')) ||
         (targetScreen.id === 'C_SECRET_HEART' &&
           this.revealedSecrets.has('claimed_cave_secret_heart'));
+
+      // Prevent re-buying an already-collected Secret Shop Heart Container
+      if (
+        targetScreen.id === 'C_SECRET_SHOP' &&
+        targetScreen.shopItems &&
+        this.collectedHeartContainers.has('hc_shop_secret_heart')
+      ) {
+        targetScreen.shopItems = targetScreen.shopItems.filter(
+          (item) => item.type !== ItemType.HEART_CONTAINER
+        );
+      }
 
       this.oldMan = new OldManNPC({
         screenId: targetScreen.id,
@@ -544,8 +644,21 @@ export class GameEngine {
       );
     }
 
-    // Spawn screen enemies
-    this.enemies = targetScreen.enemies.map((e, index) => {
+    // Sync Boss Gate state for boss chambers (sealed while boss alive, open once defeated)
+    const bossChamberCfg = getBossBattleByScreenId(targetScreen.id);
+    const isBossAlreadyDefeated = bossChamberCfg
+      ? this.defeatedBossRooms.has(targetScreen.id)
+      : false;
+    if (bossChamberCfg) {
+      applyBossGateState(targetScreen, isBossAlreadyDefeated);
+    }
+
+    // Spawn screen enemies (skip already-defeated dungeon bosses)
+    const screenEnemies =
+      bossChamberCfg && isBossAlreadyDefeated
+        ? targetScreen.enemies.filter((e) => e.type !== bossChamberCfg.bossType)
+        : targetScreen.enemies;
+    this.enemies = screenEnemies.map((e, index) => {
       // Octorok Enemy Subclass instantiation
       if (e.type === EnemyType.OCTOROK_RED || e.type === EnemyType.OCTOROK_BLUE) {
         return new OctorokEnemy({
@@ -738,15 +851,21 @@ export class GameEngine {
       });
     }
 
-    // Spawn Triforce Piece if in D1_6
-    if (screen.id === 'D1_6' && this.player.inventory.triforcePieces === 0) {
+    // Spawn dungeon Triforce Piece in its altar room if not yet collected
+    const triforceCfg = getTriforceByScreenId(screen.id);
+    if (triforceCfg && !this.collectedTriforceIds.has(triforceCfg.triforceId)) {
       this.pickups.push({
-        id: 'd1_triforce',
+        id: triforceCfg.triforceId,
         type: ItemType.TRIFORCE,
-        x: 120,
-        y: 80,
+        x: triforceCfg.triforceSpawn.x,
+        y: triforceCfg.triforceSpawn.y,
         amount: 1,
         timer: 999999,
+        customData: {
+          triforceId: triforceCfg.triforceId,
+          level: triforceCfg.level,
+          triforceName: triforceCfg.triforceName,
+        },
       });
     }
 
@@ -757,15 +876,6 @@ export class GameEngine {
         { id: 'sec_rupee_2', type: ItemType.RUPEE_FIVE, x: 96, y: 80, amount: 5, timer: 999999 },
         { id: 'sec_rupee_3', type: ItemType.RUPEE_FIVE, x: 144, y: 80, amount: 5, timer: 999999 }
       );
-    } else if (screen.id === 'C_SECRET_HEART' && !this.revealedSecrets.has('claimed_cave_secret_heart')) {
-      this.pickups.push({
-        id: 'sec_heart_container',
-        type: ItemType.HEART_CONTAINER,
-        x: 120,
-        y: 80,
-        amount: 2,
-        timer: 999999,
-      });
     } else if (screen.id === 'D1_SECRET_VAULT') {
       this.pickups.push(
         { id: 'vault_bomb', type: ItemType.BOMB, x: 96, y: 70, amount: 4, timer: 999999 },
@@ -786,18 +896,8 @@ export class GameEngine {
         timer: 999999,
       });
     } else if (screen.id === 'C_SECRET_FAIRY_SPRING') {
-      // Fairy Spring restores full health & bestows Heart Container upgrade
+      // Fairy Spring restores full health (Heart Container altar handled cleanly by OldManNPC)
       this.player.hearts = this.player.maxHearts;
-      if (!this.revealedSecrets.has('claimed_fairy_heart')) {
-        this.pickups.push({
-          id: 'sec_fairy_heart',
-          type: ItemType.HEART_CONTAINER,
-          x: 120,
-          y: 80,
-          amount: 2,
-          timer: 999999,
-        });
-      }
     } else if (screen.id === 'D1_SECRET_CHAMBER') {
       this.pickups.push(
         { id: 'chamber_bomb', type: ItemType.BOMB, x: 96, y: 70, amount: 4, timer: 999999 },
@@ -825,15 +925,6 @@ export class GameEngine {
           timer: 999999,
         });
       }
-    } else if (screen.id === 'D2_TRIFORCE' && this.player.inventory.triforcePieces < 2) {
-      this.pickups.push({
-        id: 'd2_triforce',
-        type: ItemType.TRIFORCE,
-        x: 120,
-        y: 80,
-        amount: 1,
-        timer: 999999,
-      });
     } else if (screen.id === 'D3_VAULT' && !this.player.hasRedRing) {
       this.pickups.push({
         id: 'd3_red_ring',
@@ -843,26 +934,7 @@ export class GameEngine {
         amount: 1,
         timer: 999999,
       });
-    } else if (screen.id === 'D3_TRIFORCE' && this.player.inventory.triforcePieces < 3) {
-      this.pickups.push({
-        id: 'd3_triforce',
-        type: ItemType.TRIFORCE,
-        x: 120,
-        y: 80,
-        amount: 1,
-        timer: 999999,
-      });
     } else if (screen.id === 'D2_SECRET_SHRINE') {
-      if (!this.revealedSecrets.has('claimed_d2_shrine_heart')) {
-        this.pickups.push({
-          id: 'd2_shrine_heart',
-          type: ItemType.HEART_CONTAINER,
-          x: 120,
-          y: 72,
-          amount: 2,
-          timer: 999999,
-        });
-      }
       this.pickups.push({
         id: 'd2_shrine_bombs',
         type: ItemType.BOMB,
@@ -876,6 +948,15 @@ export class GameEngine {
         { id: 'd3_passage_rupee', type: ItemType.RUPEE_FIVE, x: 104, y: 80, amount: 5, timer: 999999 },
         { id: 'd3_passage_key', type: ItemType.KEY, x: 140, y: 80, amount: 1, timer: 999999 }
       );
+    }
+
+    // Spawn any uncollected overworld or dungeon Heart Container pickups mapped to this screen
+    const worldHeartContainers = getSpawnableHeartContainersForScreen(
+      screen.id,
+      this.collectedHeartContainers
+    );
+    if (worldHeartContainers.length > 0) {
+      this.pickups.push(...worldHeartContainers);
     }
 
     chiptune.playBgm(targetScreen.music);
@@ -956,6 +1037,9 @@ export class GameEngine {
 
   private updatePhysics() {
     this.animTick++;
+    if (this.heartUpgradeBannerTimer > 0) {
+      this.heartUpgradeBannerTimer--;
+    }
 
     // Global weather controller: updates outdoor rain particles, ambient 2A03 chiptune, and lightning
     const isOutdoor = this.currentScreen && this.currentScreen.type === 'overworld';
@@ -987,8 +1071,8 @@ export class GameEngine {
         this.player.isHoldingItem = false;
         const collectedTriforce = this.player.heldItemType === ItemType.TRIFORCE;
         this.player.heldItemType = null;
-        if (collectedTriforce && (this.currentScreen.id === 'D1_6' || this.currentScreen.id === 'D2_TRIFORCE' || this.currentScreen.id === 'D3_TRIFORCE')) {
-          // Victory!
+        if (collectedTriforce && getTriforceByScreenId(this.currentScreen.id)) {
+          // Triforce shard recovered!
           this.gameState = GameState.VICTORY;
           this.onStateChange?.(GameState.VICTORY);
         }
@@ -1031,12 +1115,43 @@ export class GameEngine {
   private updatePlayerMovement() {
     const p = this.player;
 
-    // Handle knockback when damaged
+    // Handle knockback when damaged without clipping through walls, water, or blocks
     if (p.knockback && p.knockback.duration > 0) {
-      p.x += p.knockback.x;
-      p.y += p.knockback.y;
+      const kbResult = stepKnockbackSafe(
+        this.currentScreen.tiles,
+        p.x,
+        p.y,
+        p.knockback.x,
+        p.knockback.y,
+        SCREEN_WIDTH,
+        SCREEN_HEIGHT,
+        PLAYER_HITBOX_SIZE,
+        PLAYER_HITBOX_SIZE
+      );
+      p.x = kbResult.x;
+      p.y = kbResult.y;
+      if (kbResult.blockedX) p.knockback.x = 0;
+      if (kbResult.blockedY) p.knockback.y = 0;
       p.knockback.duration--;
       return;
+    }
+
+    // Immediate depenetration safeguard: if Link is overlapping any solid asset, ease to nearest walkable spot
+    if (this.checkTileCollision(p.x, p.y, PLAYER_HITBOX_SIZE, PLAYER_HITBOX_SIZE)) {
+      const unstuck = findNearestWalkablePosition(
+        this.currentScreen.tiles,
+        p.x,
+        p.y,
+        SCREEN_WIDTH,
+        SCREEN_HEIGHT,
+        PLAYER_HITBOX_SIZE,
+        PLAYER_HITBOX_SIZE,
+        16
+      );
+      if (unstuck) {
+        p.x = unstuck.x;
+        p.y = unstuck.y;
+      }
     }
 
     if (p.invincibleTimer > 0) {
@@ -1078,46 +1193,109 @@ export class GameEngine {
         p.animTimer = 0;
       }
 
-      // Half-tile snapping / axis alignment for smooth corner gliding
+      // Half-tile snapping / axis alignment for smooth corner gliding (collision-guarded)
+      let nudgeX = 0;
+      let nudgeY = 0;
       if (dx !== 0 && Math.abs(dy) === 0) {
         // Moving horizontally -> smooth y to nearest 8px
         const modY = Math.round(p.y) % 8;
-        if (modY > 0 && modY <= 3) p.y -= 0.5;
-        else if (modY >= 5) p.y += 0.5;
+        if (modY > 0 && modY <= 3) nudgeY = -0.5;
+        else if (modY >= 5) nudgeY = 0.5;
       } else if (dy !== 0 && Math.abs(dx) === 0) {
         // Moving vertically -> smooth x to nearest 8px
         const modX = Math.round(p.x) % 8;
-        if (modX > 0 && modX <= 3) p.x -= 0.5;
-        else if (modX >= 5) p.x += 0.5;
+        if (modX > 0 && modX <= 3) nudgeX = -0.5;
+        else if (modX >= 5) nudgeX = 0.5;
       }
 
-      // Exit doorway funnel assist: gently align Link into doorway openings to prevent catching on border corners
+      // Exit doorway funnel assist: gently align Link into doorway openings without clipping into adjacent solids
       if (dy < 0 && p.y < 32 && this.currentScreen.exits.up) {
-        if (p.x < 118 && p.x > 96) p.x += 0.5;
-        else if (p.x > 122 && p.x < 144) p.x -= 0.5;
+        if (p.x < 118 && p.x > 96) nudgeX = 0.5;
+        else if (p.x > 122 && p.x < 144) nudgeX = -0.5;
       } else if (dy > 0 && p.y > SCREEN_HEIGHT - 48 && this.currentScreen.exits.down) {
-        if (p.x < 118 && p.x > 96) p.x += 0.5;
-        else if (p.x > 122 && p.x < 144) p.x -= 0.5;
+        if (p.x < 118 && p.x > 96) nudgeX = 0.5;
+        else if (p.x > 122 && p.x < 144) nudgeX = -0.5;
       } else if (dx < 0 && p.x < 32 && this.currentScreen.exits.left) {
-        if (p.y < 86 && p.y > 64) p.y += 0.5;
-        else if (p.y > 90 && p.y < 112) p.y -= 0.5;
+        if (p.y < 86 && p.y > 64) nudgeY = 0.5;
+        else if (p.y > 90 && p.y < 112) nudgeY = -0.5;
       } else if (dx > 0 && p.x > SCREEN_WIDTH - 48 && this.currentScreen.exits.right) {
-        if (p.y < 86 && p.y > 64) p.y += 0.5;
-        else if (p.y > 90 && p.y < 112) p.y -= 0.5;
+        if (p.y < 86 && p.y > 64) nudgeY = 0.5;
+        else if (p.y > 90 && p.y < 112) nudgeY = -0.5;
       }
 
-      // Check collision before moving
+      if (nudgeX !== 0 || nudgeY !== 0) {
+        const nudged = applyGuardedNudge(
+          this.currentScreen.tiles,
+          p.x,
+          p.y,
+          nudgeX,
+          nudgeY,
+          SCREEN_WIDTH,
+          SCREEN_HEIGHT,
+          PLAYER_HITBOX_SIZE,
+          PLAYER_HITBOX_SIZE
+        );
+        p.x = nudged.x;
+        p.y = nudged.y;
+      }
+
+      // Check collision before moving (allows overlap-reducing escape steps if ever overlapping)
       const nextX = p.x + dx;
       const nextY = p.y + dy;
 
       let movedX = false;
       let movedY = false;
 
-      if (!this.checkTileCollision(nextX, p.y, 14, 14)) {
+      const { withinX } = canOccupyScreenBounds(
+        p.x,
+        p.y,
+        nextX,
+        p.y,
+        PLAYER_HITBOX_SIZE,
+        PLAYER_HITBOX_SIZE,
+        SCREEN_WIDTH,
+        SCREEN_HEIGHT
+      );
+      const { withinY } = canOccupyScreenBounds(
+        p.x,
+        p.y,
+        p.x,
+        nextY,
+        PLAYER_HITBOX_SIZE,
+        PLAYER_HITBOX_SIZE,
+        SCREEN_WIDTH,
+        SCREEN_HEIGHT
+      );
+
+      if (
+        withinX &&
+        dx !== 0 &&
+        canStepToTilePosition(
+          this.currentScreen.tiles,
+          p.x,
+          p.y,
+          nextX,
+          p.y,
+          PLAYER_HITBOX_SIZE,
+          PLAYER_HITBOX_SIZE
+        )
+      ) {
         p.x = nextX;
         movedX = true;
       }
-      if (!this.checkTileCollision(p.x, nextY, 14, 14)) {
+      if (
+        withinY &&
+        dy !== 0 &&
+        canStepToTilePosition(
+          this.currentScreen.tiles,
+          p.x,
+          p.y,
+          p.x,
+          nextY,
+          PLAYER_HITBOX_SIZE,
+          PLAYER_HITBOX_SIZE
+        )
+      ) {
         p.y = nextY;
         movedY = true;
       }
@@ -1137,13 +1315,14 @@ export class GameEngine {
     const p = this.player;
 
     // A Button (Sword Attack)
-    if (this.input.attack && !this.prevAttack && !p.isAttacking && p.swordTier > 0) {
+    const hasSword = p.swordTier > 0 || p.inventory.hasSword;
+    if (this.input.attack && !this.prevAttack && !p.isAttacking && hasSword) {
       p.isAttacking = true;
       p.attackTimer = 12;
       chiptune.playSwordSlash();
 
-      // Sword Beam firing if Link at full health!
-      if (p.hearts >= p.maxHearts) {
+      // Sword Beam firing if Link is at full health
+      if (isPlayerAtFullHealth(p)) {
         this.fireSwordBeam();
       }
 
@@ -1159,59 +1338,12 @@ export class GameEngine {
     this.prevItem = this.input.item;
   }
 
-  private fireSwordBeam() {
-    const p = this.player;
-
-    // Link must have a sword and full health
-    if (p.swordTier <= 0 || p.hearts < p.maxHearts) return;
-
-    // Authentic NES Zelda rule: Only one active sword beam projectile on screen at once
-    const hasActiveBeam = this.projectiles.some(
-      (proj) => proj.active && proj.type === 'sword_beam' && proj.owner === 'player'
-    );
-    if (hasActiveBeam) return;
+  public fireSwordBeam(): boolean {
+    if (!canFireSwordBeam(this.player, this.projectiles)) return false;
 
     chiptune.playSwordBeam();
-
-    let vx = 0;
-    let vy = 0;
-    const speed = 4.5;
-
-    // Center 8x8 collision box in front of Link (16x16 sprite)
-    let spawnX = p.x + 4;
-    let spawnY = p.y + 4;
-
-    if (p.dir === Direction.UP) {
-      vy = -speed;
-      spawnY = p.y - 6;
-    } else if (p.dir === Direction.DOWN) {
-      vy = speed;
-      spawnY = p.y + 14;
-    } else if (p.dir === Direction.LEFT) {
-      vx = -speed;
-      spawnX = p.x - 6;
-    } else if (p.dir === Direction.RIGHT) {
-      vx = speed;
-      spawnX = p.x + 14;
-    }
-
-    // Authentic damage scale based on current sword tier:
-    // Wood Sword: 2 damage; White Sword: 4 damage; Magical Sword: 8 damage
-    const beamDamage = p.swordTier === 3 ? 8 : p.swordTier === 2 ? 4 : 2;
-
-    this.projectiles.push({
-      id: `beam_${Date.now()}_${Math.random()}`,
-      type: 'sword_beam',
-      x: spawnX,
-      y: spawnY,
-      vx,
-      vy,
-      dir: p.dir,
-      timer: 80,
-      owner: 'player',
-      active: true,
-      damage: beamDamage,
-    });
+    this.projectiles.push(createSwordBeamProjectile(this.player));
+    return true;
   }
 
   private useBItem() {
@@ -1557,6 +1689,7 @@ export class GameEngine {
       enemy.isDead = true;
       enemy.deathTimer = 22;
       chiptune.playEnemyDie();
+      this.recordEnemyDefeat(enemy.type);
 
       // Emit enemy defeat particle burst (smoke clouds, shockwave ring, embers, wisps)
       const isBoss =
@@ -1568,17 +1701,8 @@ export class GameEngine {
       this.particles.emitEnemyDefeat(centerX, centerY, enemy.type, isBoss);
       this.triggerScreenShake(isBoss ? 12 : 5, isBoss ? 2 : 1);
 
-      // Boss defeated: unlocks north doorway to Triforce chamber
-      if (enemy.type === EnemyType.DODONGO && this.currentScreen.id === 'D2_BOSS') {
-        this.currentScreen.tiles[0][7] = 6;
-        this.currentScreen.tiles[0][8] = 6;
-        chiptune.playSecret();
-      }
-      if (enemy.type === EnemyType.MANHANDLA && this.currentScreen.id === 'D3_BOSS') {
-        this.currentScreen.tiles[0][7] = 6;
-        this.currentScreen.tiles[0][8] = 6;
-        chiptune.playSecret();
-      }
+      // Boss defeated: unlocks Boss Gate to the dungeon's Triforce Chamber
+      this.handleBossDefeat(enemy);
 
       // Zol splits into 2 mini Gel blobs when defeated
       if (enemy.type === EnemyType.ZOL) {
@@ -1634,7 +1758,8 @@ export class GameEngine {
     type: ItemType,
     amount: number = 1,
     delayFrames: number = 16,
-    permanent: boolean = false
+    permanent: boolean = false,
+    customData?: Record<string, any>
   ) {
     if (delayFrames <= 0) {
       this.particles.emitItemPoof(x + 8, y + 8);
@@ -1647,6 +1772,7 @@ export class GameEngine {
         amount,
         timer: permanent ? 999999 : type === ItemType.FAIRY ? 900 : 600,
         spawnTimer: 14,
+        customData,
       });
     } else {
       this.pendingLootDrops.push({
@@ -1656,7 +1782,61 @@ export class GameEngine {
         type,
         amount,
         permanent,
+        customData,
       });
+    }
+  }
+
+  private handleBossDefeat(enemy: Enemy) {
+    const bossCfg = getBossBattleByEnemyType(enemy.type, this.currentScreen.id);
+    if (!bossCfg) return;
+
+    this.defeatedBossRooms.add(bossCfg.bossScreenId);
+    this.player.defeatedBossRooms = Array.from(this.defeatedBossRooms);
+
+    const gateOpened = applyBossGateState(this.currentScreen, true);
+    if (gateOpened) {
+      for (const gt of bossCfg.gateTiles) {
+        this.particles.emitSparkleBurst(gt.col * TILE_SIZE + 8, gt.row * TILE_SIZE + 8);
+      }
+      this.triggerScreenShake(10, 2);
+      chiptune.playSecret();
+      this.heartUpgradeBannerTimer = 140;
+      this.heartUpgradeBannerText = `BOSS GATE OPENED! ENTER FOR ${bossCfg.triforceName.toUpperCase()}`;
+    }
+
+    this.onPlayerUpdate?.(this.player);
+    if (this.activeSlot) {
+      saveGameProgress(
+        this.activeSlot.id,
+        this.player,
+        this.currentScreen.id,
+        undefined,
+        Array.from(this.visitedScreens),
+        Array.from(this.collectedHeartContainers)
+      );
+    }
+  }
+
+  private recordEnemyDefeat(enemyType: EnemyType) {
+    const result = unlockBestiaryEntry(
+      this.player.unlockedBestiary,
+      this.player.bestiaryDefeatCounts,
+      enemyType
+    );
+    this.player.unlockedBestiary = result.unlockedBestiary;
+    this.player.bestiaryDefeatCounts = result.bestiaryDefeatCounts;
+    this.onPlayerUpdate?.(this.player);
+
+    if (result.unlockedNow && this.activeSlot) {
+      saveGameProgress(
+        this.activeSlot.id,
+        this.player,
+        this.currentScreen.id,
+        undefined,
+        Array.from(this.visitedScreens),
+        Array.from(this.collectedHeartContainers)
+      );
     }
   }
 
@@ -1667,13 +1847,15 @@ export class GameEngine {
    * categorized monster drop groups, and the classic 10th-kill guaranteed drop cycle.
    */
   private rollEnemyDrop(x: number, y: number, enemyType: EnemyType) {
-    // 1. Boss guaranteed drop: Heart Container!
-    if (
-      enemyType === EnemyType.AQUAMENTUS ||
-      enemyType === EnemyType.DODONGO ||
-      enemyType === EnemyType.MANHANDLA
-    ) {
-      this.spawnLootItemWithPoof(x + 8, y + 8, ItemType.HEART_CONTAINER, 1, 20, true);
+    // 1. Boss guaranteed drop: Heart Container (deduplicated per boss)!
+    const bossHeartId = getBossHeartContainerId(enemyType);
+    if (bossHeartId) {
+      if (!this.collectedHeartContainers.has(bossHeartId)) {
+        this.spawnLootItemWithPoof(x + 8, y + 8, ItemType.HEART_CONTAINER, 2, 20, true, {
+          heartContainerId: bossHeartId,
+          sourceType: 'boss',
+        });
+      }
       return;
     }
 
@@ -1875,12 +2057,9 @@ export class GameEngine {
             enemy.isDead = true;
             enemy.deathTimer = 22;
             chiptune.playEnemyDie();
+            this.recordEnemyDefeat(enemy.type);
             this.particles.emitEnemyDefeat(enemy.x + 16, enemy.y + 16, enemy.type, true);
-            if (this.currentScreen.id === 'D2_BOSS') {
-              this.currentScreen.tiles[0][7] = 6;
-              this.currentScreen.tiles[0][8] = 6;
-              chiptune.playSecret();
-            }
+            this.handleBossDefeat(enemy);
             this.rollEnemyDrop(enemy.x, enemy.y, enemy.type);
           }
         }
@@ -2322,10 +2501,10 @@ export class GameEngine {
         this.checkBushBurn(p.x + 4, p.y + 4);
       }
 
-      // Check collision with solid tiles
+      // Check collision with solid tiles (water tiles do not stop aerial projectiles)
       const tileCheckX = p.type === 'rock' ? p.x + 4 : p.x;
       const tileCheckY = p.type === 'rock' ? p.y + 4 : p.y;
-      if (this.checkTileCollision(tileCheckX, tileCheckY, 8, 8)) {
+      if (this.checkProjectileTileCollision(tileCheckX, tileCheckY, 8, 8)) {
         if (p.type === 'sword_beam') {
           this.particles.emitSwordBeamHit(p.x + 4, p.y + 4);
           this.checkSwordWallStrike(p.x + 4, p.y + 4, p.dir);
@@ -2363,6 +2542,8 @@ export class GameEngine {
       if (p.owner === 'player') {
         for (const enemy of this.enemies) {
           if (enemy.isDead || (enemy as any).isSubmerged || (enemy as any).isHidden || !p.active) continue;
+          // Do not let enemies already in melee/damage invincibility frames consume a projectile without taking damage
+          if (p.type !== 'boomerang' && enemy.isHurt) continue;
 
           // Enemy collision box
           const isBoss =
@@ -2764,6 +2945,7 @@ export class GameEngine {
           amount: drop.amount,
           timer: drop.permanent ? 999999 : drop.type === ItemType.FAIRY ? 900 : 600,
           spawnTimer: 14,
+          customData: drop.customData,
         });
 
         this.pendingLootDrops.splice(i, 1);
@@ -2845,8 +3027,12 @@ export class GameEngine {
               type: item.type,
               x: item.x,
               y: item.y,
-              amount: item.type === ItemType.BOMB ? 4 : 1,
+              amount: item.type === ItemType.BOMB ? 4 : item.type === ItemType.HEART_CONTAINER ? 2 : 1,
               timer: 0,
+              customData:
+                item.type === ItemType.HEART_CONTAINER
+                  ? { heartContainerId: 'hc_shop_secret_heart', sourceType: 'shop' }
+                  : undefined,
             });
             this.currentScreen.shopItems.splice(i, 1);
             this.onPlayerUpdate?.(p);
@@ -2893,6 +3079,10 @@ export class GameEngine {
       inputAction,
       (itemType) => {
         this.revealedSecrets.add(`claimed_cave_item_${this.currentScreen.id}`);
+        const caveHcId =
+          itemType === ItemType.HEART_CONTAINER
+            ? getCaveHeartContainerId(this.currentScreen.id)
+            : null;
         this.collectItem({
           id: `cave_gift_${itemType}_${Date.now()}`,
           type: itemType,
@@ -2900,6 +3090,7 @@ export class GameEngine {
           y: this.oldMan!.itemY,
           amount: itemType === ItemType.RUPEE_FIVE ? 5 : itemType === ItemType.BOMB ? 4 : 1,
           timer: 0,
+          customData: caveHcId ? { heartContainerId: caveHcId, sourceType: 'cave' } : undefined,
         });
         this.onPlayerUpdate?.(this.player);
       },
@@ -2947,47 +3138,74 @@ export class GameEngine {
         }
         break;
 
-      case ItemType.TRIFORCE:
-        if (this.currentScreen.id === 'D1_6') {
-          p.inventory.triforcePieces = Math.max(p.inventory.triforcePieces, 1);
-        } else if (this.currentScreen.id === 'D2_TRIFORCE') {
-          p.inventory.triforcePieces = Math.max(p.inventory.triforcePieces, 2);
-        } else if (this.currentScreen.id === 'D3_TRIFORCE') {
-          p.inventory.triforcePieces = Math.max(p.inventory.triforcePieces, 3);
-        } else {
-          p.inventory.triforcePieces = Math.max(p.inventory.triforcePieces, 1);
-        }
+      case ItemType.TRIFORCE: {
+        const triforceCfg = getTriforceByScreenId(this.currentScreen.id);
+        const triforceId = item.customData?.triforceId ?? triforceCfg?.triforceId;
+        const result = applyTriforcePieceCollection(p, this.collectedTriforceIds, triforceId);
+        this.heartUpgradeBannerTimer = 180;
+        this.heartUpgradeBannerText = `${(triforceCfg?.triforceName || 'TRIFORCE PIECE').toUpperCase()} (${result.totalCollected}/${TOTAL_TRIFORCE_PIECES})`;
         p.isHoldingItem = true;
         p.heldItemType = item.type;
         p.heldItemTimer = 200;
         chiptune.playItemFanfare();
         if (this.activeSlot) {
-          saveGameProgress(this.activeSlot.id, p, this.currentScreen.id);
+          saveGameProgress(
+            this.activeSlot.id,
+            p,
+            this.currentScreen.id,
+            undefined,
+            Array.from(this.visitedScreens),
+            Array.from(this.collectedHeartContainers)
+          );
         }
         break;
+      }
 
       case ItemType.HEART:
         p.hearts = Math.min(p.maxHearts, p.hearts + item.amount);
         chiptune.playHeart();
         break;
 
-      case ItemType.HEART_CONTAINER:
-        p.maxHearts += 2;
-        p.hearts = p.maxHearts;
-        chiptune.playItemFanfare();
-        p.isHoldingItem = true;
-        p.heldItemType = item.type;
-        p.heldItemTimer = 100;
-        if (this.currentScreen.id === 'C_SECRET_FAIRY_SPRING') {
-          this.revealedSecrets.add('claimed_fairy_heart');
-        }
-        if (this.currentScreen.id === 'C_SECRET_HEART') {
-          this.revealedSecrets.add('claimed_cave_secret_heart');
-        }
-        if (this.currentScreen.id === 'D2_SECRET_SHRINE') {
-          this.revealedSecrets.add('claimed_d2_shrine_heart');
+      case ItemType.HEART_CONTAINER: {
+        const containerId: string | undefined =
+          item.customData?.heartContainerId ??
+          getCaveHeartContainerId(this.currentScreen.id) ??
+          undefined;
+        const result = applyHeartContainerUpgrade(
+          p,
+          this.collectedHeartContainers,
+          containerId
+        );
+        if (result.upgraded) {
+          chiptune.playItemFanfare();
+          this.particles.emitSparkleBurst(p.x + 8, p.y + 8);
+          p.isHoldingItem = true;
+          p.heldItemType = item.type;
+          p.heldItemTimer = 100;
+          this.heartUpgradeBannerTimer = 140;
+          this.heartUpgradeBannerText = `HEART CONTAINER! MAX LIFE ${result.totalContainers}/16`;
+          if (this.currentScreen.id === 'C_SECRET_FAIRY_SPRING') {
+            this.revealedSecrets.add('claimed_fairy_heart');
+          }
+          if (this.currentScreen.id === 'C_SECRET_HEART') {
+            this.revealedSecrets.add('claimed_cave_secret_heart');
+          }
+          if (this.currentScreen.id === 'D2_SECRET_SHRINE') {
+            this.revealedSecrets.add('claimed_d2_shrine_heart');
+          }
+          if (this.activeSlot) {
+            saveGameProgress(
+              this.activeSlot.id,
+              p,
+              this.currentScreen.id,
+              undefined,
+              Array.from(this.visitedScreens),
+              Array.from(this.collectedHeartContainers)
+            );
+          }
         }
         break;
+      }
 
       case ItemType.RUPEE:
       case ItemType.RUPEE_FIVE:
@@ -3272,10 +3490,30 @@ export class GameEngine {
       fadeAlpha: 0,
     };
 
+    // Increment & persist per-slot Death Counter immediately upon fatal death trigger
+    this.recordPlayerDeath();
+
     // Play 2A03 chiptune death chime sound effect the instant player's hearts reach zero
     chiptune.playDeathChime();
     chiptune.playDeathChimeStrike();
     chiptune.playPlayerDeathSpin(0);
+  }
+
+  private recordPlayerDeath() {
+    const nextDeaths = Math.max(0, (this.player.deaths ?? this.activeSlot?.deaths ?? 0) + 1);
+    this.player.deaths = nextDeaths;
+    if (this.activeSlot) {
+      this.activeSlot.deaths = nextDeaths;
+      saveGameProgress(
+        this.activeSlot.id,
+        this.player,
+        this.currentScreen.id,
+        nextDeaths,
+        Array.from(this.visitedScreens),
+        Array.from(this.collectedHeartContainers)
+      );
+    }
+    this.onPlayerUpdate?.(this.player);
   }
 
   private updatePlayerDeath() {
@@ -3347,15 +3585,15 @@ export class GameEngine {
       state.fadeAlpha = Math.min(1.0, state.timer / 24);
 
       if (state.timer >= 28) {
-        // Increment deaths in active save slot & save progress
+        // Persist latest slot state (death already counted in recordPlayerDeath)
         if (this.activeSlot) {
-          this.activeSlot.deaths++;
           saveGameProgress(
             this.activeSlot.id,
             this.player,
             this.currentScreen.id,
             this.activeSlot.deaths,
-            Array.from(this.visitedScreens)
+            Array.from(this.visitedScreens),
+            Array.from(this.collectedHeartContainers)
           );
         }
 
@@ -3371,6 +3609,10 @@ export class GameEngine {
   // --- TILE COLLISION & SCREEN BOUNDARY TRANSITIONS ---
 
   private checkTileCollision(x: number, y: number, width: number, height: number): boolean {
+    return checkGridTileCollision(this.currentScreen.tiles, x, y, width, height);
+  }
+
+  private checkProjectileTileCollision(x: number, y: number, width: number, height: number): boolean {
     const minCol = Math.floor(x / TILE_SIZE);
     const maxCol = Math.floor((x + width - 1) / TILE_SIZE);
     const minRow = Math.floor(y / TILE_SIZE);
@@ -3380,18 +3622,7 @@ export class GameEngine {
       for (let c = minCol; c <= maxCol; c++) {
         if (r < 0 || r >= 11 || c < 0 || c >= 16) continue;
         const tile = this.currentScreen.tiles[r][c];
-        // Solid tiles: 1 (Tree), 2 (Rock), 3 (Water), 5 (Dungeon Wall), 12 (Bush), 13 (Bombable Wall/Rock), 14 (Pushable Block), 17 (Fissured Secret Rock), 18 (Gravestone)
-        if (
-          tile === 1 ||
-          tile === 2 ||
-          tile === 3 ||
-          tile === 5 ||
-          tile === 12 ||
-          tile === 13 ||
-          tile === 14 ||
-          tile === 17 ||
-          tile === 18
-        ) {
+        if (isProjectileSolidTile(tile)) {
           return true;
         }
       }
@@ -3526,12 +3757,12 @@ export class GameEngine {
 
     if (p.x >= SCREEN_WIDTH - 16 && this.currentScreen.exits.right) {
       targetId = this.currentScreen.exits.right;
-      nextX = 14;
+      nextX = 16;
       nextY = 88;
       dir = Direction.RIGHT;
     } else if (p.x <= 4 && this.currentScreen.exits.left) {
       targetId = this.currentScreen.exits.left;
-      nextX = SCREEN_WIDTH - 28;
+      nextX = SCREEN_WIDTH - 30;
       nextY = 88;
       dir = Direction.LEFT;
     } else if (p.y <= 4 && this.currentScreen.exits.up) {
@@ -3560,6 +3791,36 @@ export class GameEngine {
   }
 
   private fadeTickCount: number = 0;
+
+  /**
+   * Warps Link safely out to Hyrule Overworld after recovering a dungeon's Triforce piece
+   * so players can continue hunting the remaining bosses and Triforce shards.
+   */
+  public continueFromVictory() {
+    const cfg = getTriforceByScreenId(this.currentScreen.id);
+    const targetScreen = cfg?.overworldExit.screenId ?? 'O7_7';
+    const spawnX = cfg?.overworldExit.x ?? 120;
+    const spawnY = cfg?.overworldExit.y ?? 88;
+
+    this.player.hearts = this.player.maxHearts;
+    this.player.dir = Direction.DOWN;
+    this.resetFade();
+    this.loadScreen(targetScreen, spawnX, spawnY);
+    this.gameState = GameState.PLAYING;
+    this.onPlayerUpdate?.(this.player);
+    this.onStateChange?.(GameState.PLAYING);
+
+    if (this.activeSlot) {
+      saveGameProgress(
+        this.activeSlot.id,
+        this.player,
+        this.currentScreen.id,
+        undefined,
+        Array.from(this.visitedScreens),
+        Array.from(this.collectedHeartContainers)
+      );
+    }
+  }
 
   /**
    * Immediately resets any active transition and restores play state.
@@ -3825,10 +4086,10 @@ export class GameEngine {
       let nextY = this.player.y;
 
       if (this.transition.dir === Direction.RIGHT) {
-        nextX = 14;
+        nextX = 16;
         nextY = 88;
       } else if (this.transition.dir === Direction.LEFT) {
-        nextX = SCREEN_WIDTH - 28;
+        nextX = SCREEN_WIDTH - 30;
         nextY = 88;
       } else if (this.transition.dir === Direction.UP) {
         nextX = 120;
@@ -3884,7 +4145,16 @@ export class GameEngine {
       const bounce =
         item.spawnTimer && item.spawnTimer > 0
           ? Math.sin((item.spawnTimer / 14) * Math.PI) * 4
-          : 0;
+          : Math.round(
+              Math.sin(this.animTick * 0.12) *
+                (item.type === ItemType.HEART_CONTAINER || item.type === ItemType.TRIFORCE ? 1.5 : 0)
+            );
+
+      if (item.type === ItemType.HEART_CONTAINER || item.type === ItemType.TRIFORCE) {
+        const haloAlpha = Math.floor(this.animTick / 6) % 2 === 0 ? 0.35 : 0.2;
+        ctx.fillStyle = `rgba(248, 184, 0, ${haloAlpha})`;
+        ctx.fillRect(item.x - 1, item.y - bounce - 1, 18, 18);
+      }
 
       drawItem(ctx, item.type, item.x, item.y - bounce);
     });
@@ -3989,6 +4259,28 @@ export class GameEngine {
     // Debug Hitbox Overlay: highlights collision rectangles of player and enemies
     if (this.showHitboxDebug) {
       this.renderDebugHitboxes();
+    }
+
+    // Heart Container Upgrade Notification Banner
+    if (this.heartUpgradeBannerTimer > 0 && this.heartUpgradeBannerText) {
+      ctx.save();
+      ctx.font = '6px "Press Start 2P", monospace, sans-serif';
+      const tw = Math.ceil(ctx.measureText(this.heartUpgradeBannerText).width) + 12;
+      const bx = Math.max(4, Math.floor((SCREEN_WIDTH - tw) / 2));
+      ctx.fillStyle = 'rgba(0, 0, 0, 0.88)';
+      ctx.fillRect(bx, 18, tw, 14);
+      ctx.strokeStyle = '#f8b800';
+      ctx.lineWidth = 1;
+      ctx.strokeRect(bx + 0.5, 18.5, tw - 1, 13);
+      ctx.fillStyle = '#f8b800';
+      ctx.textAlign = 'center';
+      ctx.fillText(this.heartUpgradeBannerText, SCREEN_WIDTH / 2, 28);
+      ctx.restore();
+    }
+
+    // Temporary Entry Trigger Volume Debug Overlay: highlights invisible entry/exit/secret trigger zones
+    if (this.showEntryTriggerDebug) {
+      this.renderDebugEntryTriggers();
     }
 
     // Screen transition wipe/fade overlay (supports fade, iris-in/out, tile-flip, or curtain wipe)
@@ -4334,6 +4626,262 @@ export class GameEngine {
     ctx.font = '5px "Press Start 2P", monospace, sans-serif';
     ctx.textAlign = 'left';
     ctx.fillText(`HITBOX DBG (E:${activeEnemyCount})`, SCREEN_WIDTH - 104, 10);
+
+    ctx.restore();
+  }
+
+  /**
+   * Returns all invisible entry/exit/secret trigger volumes mapped for the current screen.
+   */
+  public getEntryTriggerVolumes(): EntryTriggerVolume[] {
+    return getScreenEntryTriggerVolumes(this.currentScreen, this.screens, this.revealedSecrets);
+  }
+
+  /**
+   * Developer debug action: instantly teleports Link onto a selected trigger volume's
+   * safe walkable entry coordinates and triggers screen transition checks immediately.
+   */
+  public warpToTriggerVolume(triggerId: string): {
+    ok: boolean;
+    screenId: string;
+    targetScreenId?: string;
+    x?: number;
+    y?: number;
+    transitionStarted: boolean;
+    message: string;
+  } {
+    const trigger = this.getEntryTriggerVolumes().find((t) => t.id === triggerId);
+    if (!trigger) {
+      return {
+        ok: false,
+        screenId: this.currentScreen.id,
+        transitionStarted: false,
+        message: `Trigger "${triggerId}" not found on ${this.currentScreen.id}`,
+      };
+    }
+
+    const warp = computeTriggerWarpPoint(trigger, this.currentScreen);
+    if (!warp.canTeleport) {
+      return {
+        ok: false,
+        screenId: this.currentScreen.id,
+        targetScreenId: warp.targetScreenId,
+        transitionStarted: false,
+        message: warp.reason,
+      };
+    }
+
+    const dirMap: Record<TriggerOrientationDir, Direction> = {
+      up: Direction.UP,
+      down: Direction.DOWN,
+      left: Direction.LEFT,
+      right: Direction.RIGHT,
+    };
+
+    // Reset any pending lock/fade/transition so teleport and screen transition run cleanly
+    this.fade.active = false;
+    this.fade.opacity = 0;
+    this.fade.phase = 'none';
+    this.transition.active = false;
+    this.player.knockback = { x: 0, y: 0, duration: 0 };
+    this.player.invincibleTimer = 0;
+    this.player.attackTimer = 0;
+    this.pushTimer = 0;
+
+    if (this.gameState !== GameState.PLAYING) {
+      this.gameState = GameState.PLAYING;
+      this.onStateChange?.(GameState.PLAYING);
+    }
+
+    this.player.x = warp.x;
+    this.player.y = warp.y;
+    this.player.dir = dirMap[warp.dir];
+    this.particles.emitSparkleBurst(this.player.x + 7, this.player.y + 7);
+    this.onPlayerUpdate?.({ ...this.player });
+
+    const prevScreenId = this.currentScreen.id;
+    this.checkScreenTransitions();
+    const transitionStarted = this.fade.active || this.transition.active;
+
+    return {
+      ok: true,
+      screenId: prevScreenId,
+      targetScreenId: trigger.targetScreenId,
+      x: warp.x,
+      y: warp.y,
+      transitionStarted,
+      message:
+        transitionStarted && trigger.targetScreenId
+          ? `Warping to ${trigger.targetScreenId} via ${trigger.label}`
+          : warp.reason,
+    };
+  }
+
+  /**
+   * Temporary visual debugger highlighting every invisible entry/transition trigger volume
+   * on the active screen (edge thresholds, walkable apertures, caves, dungeons, and secrets).
+   */
+  private renderDebugEntryTriggers() {
+    const ctx = this.ctx;
+    ctx.save();
+
+    const triggers = this.getEntryTriggerVolumes();
+    const loc = getPlayerOverworldLocation(this.currentScreen);
+
+    for (const trig of triggers) {
+      let fill = 'rgba(0, 229, 255, 0.18)';
+      let stroke = '#00e5ff';
+
+      if (trig.kind === 'unmapped_open_edge' || !trig.targetExists || (trig.kind === 'edge_exit' && !trig.isReachable)) {
+        fill = 'rgba(255, 23, 68, 0.30)';
+        stroke = '#ff1744';
+      } else if (trig.kind === 'cave_entry' || trig.kind === 'dungeon_entry') {
+        fill = 'rgba(224, 64, 251, 0.32)';
+        stroke = '#e040fb';
+      } else if (trig.kind === 'secret_entry') {
+        if (trig.isRevealed) {
+          fill = 'rgba(88, 248, 152, 0.30)';
+          stroke = '#58f898';
+        } else {
+          fill = 'rgba(248, 184, 0, 0.20)';
+          stroke = '#f8b800';
+        }
+      } else if (trig.kind === 'hardcoded_stairs') {
+        fill = 'rgba(88, 248, 152, 0.30)';
+        stroke = '#58f898';
+      }
+
+      // 1. Threshold zone checked by checkScreenTransitions()
+      const tr = trig.thresholdRect;
+      ctx.fillStyle = fill;
+      ctx.fillRect(tr.x, tr.y, tr.width, tr.height);
+      ctx.strokeStyle = stroke;
+      ctx.lineWidth = 1;
+      ctx.setLineDash([3, 2]);
+      ctx.strokeRect(tr.x + 0.5, tr.y + 0.5, Math.max(1, tr.width - 1), Math.max(1, tr.height - 1));
+      ctx.setLineDash([]);
+
+      // 2. Highlight exact walkable doorway / entry tiles inside the trigger
+      for (const wr of trig.walkableRects) {
+        ctx.fillStyle = fill;
+        ctx.fillRect(wr.x, wr.y, wr.width, wr.height);
+        ctx.strokeStyle = stroke;
+        ctx.lineWidth = 1.25;
+        ctx.strokeRect(wr.x + 0.5, wr.y + 0.5, wr.width - 1, wr.height - 1);
+
+        // Diagonal hatched inner marker so doorways pop visually
+        ctx.beginPath();
+        ctx.moveTo(wr.x + 2, wr.y + 2);
+        ctx.lineTo(wr.x + wr.width - 2, wr.y + wr.height - 2);
+        ctx.moveTo(wr.x + wr.width - 2, wr.y + 2);
+        ctx.lineTo(wr.x + 2, wr.y + wr.height - 2);
+        ctx.strokeStyle = stroke;
+        ctx.lineWidth = 0.75;
+        ctx.stroke();
+      }
+
+      // 3. Label positioned safely inside viewport next to the doorway or tile
+      const anchor = trig.walkableRects[0] || tr;
+      ctx.font = '5px "Press Start 2P", monospace, sans-serif';
+      const textWidth = Math.ceil(ctx.measureText(trig.label).width) + 6;
+      const boxH = 10;
+      let lx = anchor.x;
+      let ly = anchor.y - 12;
+
+      if (trig.direction === 'left') {
+        lx = 6;
+        ly = Math.max(16, Math.min(SCREEN_HEIGHT - 14, anchor.y + 4));
+      } else if (trig.direction === 'right') {
+        lx = SCREEN_WIDTH - textWidth - 6;
+        ly = Math.max(16, Math.min(SCREEN_HEIGHT - 14, anchor.y + 4));
+      } else if (trig.direction === 'up') {
+        lx = Math.max(4, Math.min(SCREEN_WIDTH - textWidth - 4, anchor.x - 12));
+        ly = 16;
+      } else if (trig.direction === 'down') {
+        lx = Math.max(4, Math.min(SCREEN_WIDTH - textWidth - 4, anchor.x - 12));
+        ly = SCREEN_HEIGHT - 28;
+      } else {
+        lx = Math.max(4, Math.min(SCREEN_WIDTH - textWidth - 4, anchor.x - 6));
+        ly = ly < 16 ? anchor.y + anchor.height + 2 : ly;
+      }
+
+      ctx.fillStyle = 'rgba(0, 0, 0, 0.82)';
+      ctx.fillRect(lx, ly, textWidth, boxH);
+      ctx.strokeStyle = stroke;
+      ctx.lineWidth = 0.75;
+      ctx.strokeRect(lx + 0.5, ly + 0.5, textWidth - 1, boxH - 1);
+      ctx.fillStyle = stroke;
+      ctx.textAlign = 'left';
+      ctx.fillText(trig.label, lx + 3, ly + 7);
+    }
+
+    // 4. Link trigger probe indicators: top-left edge rect + center tile probe
+    const px = Math.round(this.player.x);
+    const py = Math.round(this.player.y);
+    ctx.strokeStyle = '#58f898';
+    ctx.lineWidth = 1;
+    ctx.strokeRect(px + 0.5, py + 0.5, 13, 13);
+
+    ctx.fillStyle = '#ffeb3b';
+    ctx.fillRect(px + 7, py + 7, 3, 3);
+
+    // 4b. Dry-Run Dead-Zone Validation Overlay (when triggered from #entry-trigger-inspector)
+    const val = this.debugTriggerValidation;
+    if (val && val.screenId === this.currentScreen.id) {
+      // Valid walkable entry regions inside both screen bounds & trigger
+      for (const vr of val.validEntryRects) {
+        ctx.fillStyle = 'rgba(88, 248, 152, 0.32)';
+        ctx.fillRect(vr.x, vr.y, vr.width, vr.height);
+        ctx.strokeStyle = '#58f898';
+        ctx.lineWidth = 1.5;
+        ctx.strokeRect(vr.x + 0.5, vr.y + 0.5, Math.max(1, vr.width - 1), Math.max(1, vr.height - 1));
+      }
+
+      // Solid boundary wall overlaps inside trigger threshold (amber stripes)
+      for (const sr of val.solidOverlapRects) {
+        ctx.fillStyle = 'rgba(248, 184, 0, 0.28)';
+        ctx.fillRect(sr.x, sr.y, sr.width, sr.height);
+        ctx.strokeStyle = '#f8b800';
+        ctx.lineWidth = 1;
+        ctx.setLineDash([2, 2]);
+        ctx.strokeRect(sr.x + 0.5, sr.y + 0.5, Math.max(1, sr.width - 1), Math.max(1, sr.height - 1));
+        ctx.setLineDash([]);
+      }
+
+      // Critical unreachable / out-of-bounds dead-zone overlaps (bright red X-hatch)
+      for (const dz of val.deadZoneRects) {
+        const cx = Math.max(0, dz.x);
+        const cy = Math.max(0, dz.y);
+        const cw = Math.min(SCREEN_WIDTH, dz.x + dz.width) - cx;
+        const ch = Math.min(SCREEN_HEIGHT, dz.y + dz.height) - cy;
+        if (cw > 0 && ch > 0) {
+          ctx.fillStyle = 'rgba(255, 23, 68, 0.45)';
+          ctx.fillRect(cx, cy, cw, ch);
+          ctx.strokeStyle = '#ff1744';
+          ctx.lineWidth = 1.5;
+          ctx.strokeRect(cx + 0.5, cy + 0.5, Math.max(1, cw - 1), Math.max(1, ch - 1));
+          ctx.beginPath();
+          ctx.moveTo(cx + 1, cy + 1);
+          ctx.lineTo(cx + cw - 1, cy + ch - 1);
+          ctx.moveTo(cx + cw - 1, cy + 1);
+          ctx.lineTo(cx + 1, cy + ch - 1);
+          ctx.stroke();
+        }
+      }
+    }
+
+    // 5. Top-Left Trigger Diagnostics Banner
+    const bannerText = `TRIGGERS ${this.currentScreen.id} [${loc.coordString}] (${triggers.length})`;
+    ctx.font = '5px "Press Start 2P", monospace, sans-serif';
+    const bw = Math.ceil(ctx.measureText(bannerText).width) + 8;
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.85)';
+    ctx.fillRect(2, 2, bw, 12);
+    ctx.strokeStyle = '#00e5ff';
+    ctx.lineWidth = 1;
+    ctx.strokeRect(2.5, 2.5, bw - 1, 11);
+    ctx.fillStyle = '#00e5ff';
+    ctx.textAlign = 'left';
+    ctx.fillText(bannerText, 6, 10);
 
     ctx.restore();
   }
